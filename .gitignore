@@ -75,6 +75,10 @@ docs/_build/
 .pybuilder/
 target/
 
+.qoder/
+test/
+
+
 # Jupyter Notebook
 .ipynb_checkpoints
 

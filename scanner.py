@@ -89,7 +89,7 @@ class Token:
         self.line = line
 
     def __str__(self):
-        return f"{self.lexeme:<15} {self.token_type.value:<7} {self.line}"
+        return f"{self.lexeme:<15} {self.token_type.value:<5} {self.line}"
 
 class LexialAnalyzer:
     def __init__(self,test_code):
@@ -120,6 +120,7 @@ class LexialAnalyzer:
 
     #遇到注释也要跳过
     def skip_comment(self):
+        line = self.line
         if self.current_char == '/' and self.peek() == '/':
             while self.current_char != '\0' and self.current_char != '\n':
                 self.advance()
@@ -133,7 +134,7 @@ class LexialAnalyzer:
                     break
                 self.advance()
             if self.current_char == '\0':
-                self.errors.append(f"{self.line} {ErrorCode.UNCLOSED_COMMENT.value}")  # 注释未闭合
+                self.errors.append(f"{line} {ErrorCode.UNCLOSED_COMMENT.value}")  # 注释未闭合
                 return
 
     #遇到空白字符就一直跳
@@ -148,6 +149,11 @@ class LexialAnalyzer:
 
         if self.current_char == '\0':
             self.errors.append(f"{line} {ErrorCode.UNCLOSED_CHAR.value}")  # 字符未闭合
+            return None
+
+        if self.current_char == "'":
+            self.errors.append(f"{line} {ErrorCode.INVALID_TOKEN.value}")  # 单引号内没有字符
+            self.advance()  # 跳过第二个单引号，避免重复处理
             return None
 
         #处理转义字符
@@ -166,14 +172,29 @@ class LexialAnalyzer:
                 self.advance()
             else:
                 self.errors.append(f"{line} {ErrorCode.INVALID_TOKEN.value}")  # 非法转义字符
+                # 跳过到下一个单引号或行尾
+                while self.current_char not in "'\n\0":
+                    self.advance()
+                if self.current_char == "'":
+                    self.advance()  # 跳过闭合的单引号
                 return None
         else:
             char_value = self.current_char
             self.advance()
 
         if self.current_char != "'":
-            self.errors.append(f"{self.line} {ErrorCode.UNCLOSED_CHAR.value}")  # 字符未闭合
-            return None
+            if self.current_char.isalpha():
+                self.errors.append(f"{self.line} {ErrorCode.INVALID_TOKEN.value}")  # 长度大于1
+                # 跳过到下一个单引号或行尾，避免重复报错
+                while self.current_char not in "'\n\0":
+                    self.advance()
+                if self.current_char == "'":
+                    self.advance()  # 跳过闭合的单引号
+                return None
+            else:
+                self.errors.append(f"{self.line} {ErrorCode.UNCLOSED_CHAR.value}")  # 未闭合
+                # 不需要跳过，因为已经到行尾或文件结束
+                return None
         self.advance()  #跳过 '
 
         return Token(char_value,TokenType.CHAR_LITERAL,line)
@@ -191,12 +212,20 @@ class LexialAnalyzer:
         while self.current_char.isdigit() or self.current_char in 'abcdefABCDEF':
             lexeme += self.current_char
             self.advance()
+        # 检查十六进制后是否紧跟字母或数字（如 0x3g）
+        if self.current_char.isalnum():
+            self.errors.append(f"{self.line} {ErrorCode.INVALID_TOKEN.value}")  # 非法十六进制
+            # 跳过整个非法部分
+            while self.current_char.isalnum():
+                self.advance()
+            return None
         return Token(lexeme,TokenType.NUMBER,line)
 
     #识别整数或浮点数 包括八进制 十六进制
     def read_number(self):
         lexeme = ""
         is_float = False
+        #0开头的数
         if self.current_char == '0':
             lexeme += self.current_char
             self.advance()
@@ -220,14 +249,36 @@ class LexialAnalyzer:
                 while self.current_char.isdigit():
                     lexeme += self.current_char
                     self.advance()
+                if self.current_char == '.':
+                    self.errors.append(f"{self.line} {ErrorCode.INVALID_TOKEN.value}")  # 小数点后还有小数点
+                    return None
+                # 检查小数点后是否紧跟字母（如 1.1a 这种非法格式）
+                if self.current_char.isalpha():
+                    self.errors.append(f"{self.line} {ErrorCode.INVALID_TOKEN.value}")  # 数字后紧跟字母
+                    return None
                 return Token(lexeme,TokenType.FLOAT_NUM,self.line)
-            #单独的0    
+            
+            elif self.current_char in '89':
+                self.errors.append(f"{self.line} {ErrorCode.INVALID_TOKEN.value}")  # 非法数字
+                return None
+            
+            elif self.current_char.isalpha():
+                self.errors.append(f"{self.line} {ErrorCode.INVALID_TOKEN.value}")  
+                return None
+            # 单独的0
             return Token(lexeme,TokenType.NUMBER,self.line)
 
         #普通的数
         while self.current_char.isdigit():
             lexeme += self.current_char
             self.advance()
+        # 检查数字后是否紧跟字母或下划线（如 8_it5）
+        if self.current_char.isalpha() or self.current_char == '_':
+            self.errors.append(f"{self.line} {ErrorCode.INVALID_TOKEN.value}")  # 数字后紧跟标识符字符
+            # 跳过整个非法标识符
+            while self.current_char.isalnum() or self.current_char == '_':
+                self.advance()
+            return None
         #检查小数点
         if self.current_char == '.':
             is_float = True
@@ -241,6 +292,14 @@ class LexialAnalyzer:
             while self.current_char.isdigit():
                 lexeme += self.current_char
                 self.advance()
+            # 检查小数点后是否还有小数点（如 1.1.2）
+            if self.current_char == '.':
+                self.errors.append(f"{self.line} {ErrorCode.INVALID_TOKEN.value}")  # 小数点后还有小数点
+                return None
+            # 检查小数点后是否紧跟字母（如 1.1a 这种非法格式）
+            if self.current_char.isalpha():
+                self.errors.append(f"{self.line} {ErrorCode.INVALID_TOKEN.value}")  # 数字后紧跟字母
+                return None
         
         if is_float:
             return Token(lexeme,TokenType.FLOAT_NUM,self.line)
@@ -249,7 +308,6 @@ class LexialAnalyzer:
 
     #识别字符串
     def read_string(self):
-        line = self.line
         self.advance()  #跳过"
 
         lexeme = ''
@@ -258,7 +316,7 @@ class LexialAnalyzer:
             if self.current_char == '\\':
                 self.advance()
                 if self.current_char == '\0':
-                    self.errors.append(f"{line} {ErrorCode.UNCLOSED_STRING.value}")  # 字符串未闭合
+                    self.errors.append(f"{self.line} {ErrorCode.UNCLOSED_STRING.value}")  # 字符串未闭合
                     return None
                 escape_chars = {
                     'n': '\n',
@@ -272,6 +330,11 @@ class LexialAnalyzer:
                     self.advance()
                 else:
                     self.errors.append(f"{line} {ErrorCode.INVALID_TOKEN.value}")  # 非法转义字符
+                    # 跳过到字符串结束或行尾
+                    while self.current_char not in '"\n\0':
+                        self.advance()
+                    if self.current_char == '"':
+                        self.advance()  # 跳过闭合引号
                     return None
             else:
                 lexeme += self.current_char
@@ -300,7 +363,7 @@ class LexialAnalyzer:
         char = self.current_char
         line = self.line
 
-        #双字符 --超前一个读 认出来了就要前进到双字符之后的一个字符
+        #双字符 需要超前一个读 认出来了就要前进到双字符之后的一个字符
         if char == '=':
             self.advance()
             if self.current_char == '=':
@@ -369,10 +432,12 @@ class LexialAnalyzer:
     def get_next_token(self):
 
         while self.current_char != '\0':
-            #非法字符 # @ $
-            if self.current_char in '@#$':
+            #非法字符 # @ $ 或中文字符
+            if self.current_char in '@#$' or ('\u4e00' <= self.current_char <= '\u9fff'):
                 self.errors.append(f"{self.line} {ErrorCode.ILLEGAL_CHAR.value}")  # 非法字符
-                self.advance()
+                # 跳过连续的所有非法字符，避免重复报错
+                while self.current_char in '@#$' or ('\u4e00' <= self.current_char <= '\u9fff'):
+                    self.advance()
                 continue
             #空白字符
             if self.current_char in ' \t\n\r':
@@ -426,6 +491,6 @@ if __name__ == '__main__':
     analyzer = LexialAnalyzer(test_code)
     result = analyzer.analyze()
     if result:
-        for code,content,row in result:
+        for i,(code,content,row) in enumerate(result):
             t = Token(content,code,row)
             print(t)
