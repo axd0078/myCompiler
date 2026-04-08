@@ -134,7 +134,7 @@ class LexialAnalyzer:
                     break
                 self.advance()
             if self.current_char == '\0':
-                self.errors.append(f"{line} {ErrorCode.UNCLOSED_COMMENT.value}")  # 注释未闭合
+                self.errors.append(f"{self.line} {ErrorCode.UNCLOSED_COMMENT.value}")  # 注释未闭合
                 return
 
     #遇到空白字符就一直跳
@@ -309,7 +309,7 @@ class LexialAnalyzer:
     #识别字符串
     def read_string(self):
         self.advance()  #跳过"
-
+        line = self.line
         lexeme = ''
         while self.current_char != '\0' and self.current_char != '"':
             #处理转移
@@ -494,3 +494,4 @@ if __name__ == '__main__':
         for i,(code,content,row) in enumerate(result):
             t = Token(content,code,row)
             print(t)
+
