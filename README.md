@@ -1,33 +1,26 @@
 # myCompiler
 
-一个使用 Python 编写的小型编译器前端练习项目。目前仓库已经完成两部分核心能力：
+一个使用 Python 编写的小型编译器前端练习项目。项目当前包含词法分析器和语法分析器两部分：
 
-- `scanner.py`：把源代码扫描为 token 序列
-- `parser.py`：把 token 流解析为抽象语法树（AST）
+- `scanner.py`：把类 C 源代码扫描为 token 序列。
+- `parser.py`：先对 token 流做语法错误检测；如果没有语法错误，再生成 AST 文本。
 
-这份 README 按当前代码实现重新整理，重点说明词法分析和语法分析背后的算法设计，而不是只列功能清单。
+这份 README 按当前代码实现更新，重点说明词法分析、递归下降语法分析、错误恢复和错误码输出的实现思路。
 
 ## 当前实现
 
-- 词法分析：支持关键字、标识符、整数、浮点数、字符常量、字符串、注释、运算符、界符
-- 语法分析：支持常量声明、变量声明、函数声明、函数定义、复合语句
-- 控制流语句：支持 `if/else`、`while`、`for`、`do while`、`break`、`continue`、`return`
-- 表达式系统：支持赋值、逻辑与/或、相等比较、关系比较、加减乘除模、一元运算、函数调用
-- AST 输出：使用缩进文本输出语法树，便于调试和样例比对
-- 回归测试：`test/test.py` 会自动比对 `test/sample` 下的 5 组输入输出
+- 词法分析：支持关键字、标识符、整数、浮点数、字符常量、字符串、注释、运算符、界符。
+- 语法错误检测：支持缺失标识符、缺失分号、括号/花括号不匹配、赋值左值非法、二元运算缺少操作数、`do while` 缺少 `while` 等错误。
+- 语法分析：支持常量声明、变量声明、数组后缀、函数声明、函数定义、复合语句和常见控制流语句。
+- 表达式系统：支持赋值、逻辑与/或、相等比较、关系比较、加减乘除模、一元运算、函数调用和括号表达式。
+- 输出策略：有语法错误时输出 `行号 错误码`；无语法错误时输出 AST 文本。
 
 ## 项目结构
 
 ```text
 myCompiler/
 ├── scanner.py          # 词法分析器
-├── parser.py           # 递归下降语法分析器 + AST 输出
-├── test/
-│   ├── grammer.txt     # 当前语法定义（仓库文件名即 grammer）
-│   ├── input.txt       # 语法分析示例输入
-│   ├── output.txt      # 语法分析示例输出
-│   ├── test.py         # 样例测试脚本
-│   └── sample/         # 5 组 token 输入 / AST 输出样例
+├── parser.py           # 错误检测 + 递归下降语法分析 + AST 输出
 ├── .gitignore
 ├── LICENSE
 └── README.md
@@ -46,168 +39,131 @@ token stream
    │
    ▼
 parser.py
-   │  构造: ASTNode(kind, value, type_name, name, children)
+   │  1. ErrorParser 做语法错误检测
+   │  2. 有错误: 输出 line error_code
+   │  3. 无错误: Parser 构建 AST 并渲染
    ▼
-AST text
+error list 或 AST text
 ```
 
-项目目前把“词法分析”和“语法分析”分成两个独立阶段处理。这样的结构很适合教学和调试，因为我们可以先确认 token 是否正确，再观察 AST 是否正确。
+`parser.py` 现在不是单纯的 AST 生成器，而是先执行错误检测。这样做的好处是：错误输入可以稳定输出指定错误码，合法输入仍然保留 AST 展示能力。
 
 ## 词法分析算法实现
 
 ### 1. 单指针线性扫描
 
-`scanner.py` 中的 `LexialAnalyzer` 维护 4 个核心状态：
+`scanner.py` 中的 `LexialAnalyzer` 维护 `source`、`pos`、`current_char`、`line` 这几个核心状态。扫描过程从左到右推进，主指针不回退；只有 `peek()` 会向前看 1 个字符，用于判断 `//`、`/*`、`==`、`<=`、`&&` 等需要前瞻的模式。
 
-- `source`：完整输入串
-- `pos`：当前扫描位置
-- `current_char`：当前位置字符
-- `line`：当前行号
-
-整个扫描过程是一次从左到右的线性遍历，不回退主指针。只有 `peek()` 会向前看 1 个字符，用于识别 `//`、`/*`、`==`、`<=`、`&&` 这类需要前瞻的模式。
-
-核心调度逻辑在 `get_next_token()` 中，可以概括为：
+核心分派逻辑在 `get_next_token()` 中：
 
 ```text
 while current_char != '\0':
-    先跳过空白和注释
-    再根据当前字符分派到不同识别函数
-        数字      -> read_number()
-        标识符    -> read_identifier()
-        字符常量  -> read_char_literal()
-        字符串    -> read_string()
-        运算符    -> read_operator()
-        非法字符  -> 记录错误并恢复
+    跳过空白和注释
+    数字      -> read_number()
+    标识符    -> read_identifier()
+    字符常量  -> read_char_literal()
+    字符串    -> read_string()
+    运算符    -> read_operator()
+    非法字符  -> 记录错误并恢复
 ```
 
-这本质上是“有限状态机 + 手写分派器”的实现方式。状态没有显式写成图，而是拆散到了多个 `read_xxx()` 方法中。
+这相当于一个手写有限状态机：不同状态没有集中写成状态表，而是拆到多个 `read_xxx()` 方法里。
 
-### 2. 注释与空白的跳过策略
+### 2. 注释和空白跳过
 
-算法的第一步不是产出 token，而是消除无语义字符：
+- `skip_whitespace()` 连续跳过空格、制表符、换行和回车。
+- `skip_comment()` 支持 `//` 单行注释和 `/* ... */` 多行注释。
+- 多行注释通过检查“当前字符为 `*` 且下一个字符为 `/`”来寻找闭合位置。
+- 如果多行注释到文件末尾仍未闭合，会记录 `UNCLOSED_COMMENT(103)`。
 
-- `skip_whitespace()` 连续跳过空格、制表符、换行和回车
-- `skip_comment()` 识别两类注释
-- 单行注释 `//...`：一直跳到行尾
-- 多行注释 `/*...*/`：一直扫描到 `*/`
+### 3. 数字识别
 
-多行注释的实现有一个关键点：它在循环里持续检查“当前字符是否为 `*` 且下一个字符是否为 `/`”。一旦直到文件结尾都没找到闭合符，就记录 `UNCLOSED_COMMENT(103)`。
+`read_number()` 根据首字符分支处理：
 
-### 3. 数字识别算法
+- `0x` / `0X` 开头：进入 `read_hex_number()`，按十六进制读取。
+- `0` 后接 `0-7`：按八进制读取。
+- `0` 或普通十进制整数后接 `.`：读取浮点数小数部分。
+- 数字后直接接字母或下划线，例如 `8_it5`：记录非法 token。
+- 小数点后没有数字、十六进制后没有有效字符、八进制中出现 `8/9`：记录非法 token。
 
-`read_number()` 不是简单地“读到不是数字为止”，而是按前缀区分数值类别：
+这个函数把 token 提取和数值合法性检查合在一次扫描中完成。
 
-1. 以 `0` 开头
-   - 后继是 `x` 或 `X`：进入 `read_hex_number()`，按十六进制读取
-   - 后继是 `0-7`：按八进制连续读取
-   - 后继是 `.`：按浮点数读取小数部分
-   - 后继是 `8/9` 或字母：判为非法 token
-   - 否则就是单独的 `0`
-2. 以 `1-9` 开头
-   - 先连续读取十进制整数部分
-   - 如果后面接 `.`，继续读取小数部分并返回浮点数
-   - 如果后面直接接字母或下划线，例如 `8_it5`，判为非法 token
+### 4. 字符和字符串
 
-这个实现的关键价值在于：它把“数值合法性检查”和“token 提取”合并在一次扫描里完成了，而不是先把字符串切出来再二次判断。
+`read_char_literal()` 会检查空字符常量、非法转义、多字符常量和未闭合单引号。当前字符转义支持 `\n`、`\t`、`\r`、`\\`、`\'`、`\0`。
 
-### 4. 字符常量和字符串的识别算法
+`read_string()` 会一直扫描到闭合双引号或文件结束。遇到非法转义时，会跳到下一个双引号、换行或文件结束，以减少同一处错误引发的重复报错。
 
-#### 字符常量 `read_char_literal()`
+### 5. 关键字、标识符和运算符
 
-字符常量的处理步骤是：
+`read_identifier()` 使用“最长匹配 + 关键字表查询”：先连续读取字母、数字和下划线，再去 `KEYWORDS` 中判断是否为关键字；否则返回 `IDENTIFIER(700)`。
 
-1. 先跳过开头的 `'`
-2. 识别普通字符或转义字符
-3. 检查是否存在合法的闭合 `'`
-4. 若发现空字符常量、非法转义、多字符内容或缺失闭合，引发对应错误
-
-当前实现支持的字符转义包括：`\n`、`\t`、`\r`、`\\`、`\'`、`\0`。
-
-#### 字符串 `read_string()`
-
-字符串扫描会一直读到下一个 `"` 或文件结束。它同样支持转义字符，并且在遇到非法转义时会向后跳过，直到字符串结束符、换行或文件结束，以避免同一处错误被重复上报。
-
-### 5. 关键字与标识符识别
-
-`read_identifier()` 的策略很直接：
-
-- 只要当前字符属于“字母 / 数字 / 下划线”，就继续吸收
-- 完整 lexeme 读出后，去 `KEYWORDS` 字典中查询
-- 若命中关键字，返回关键字类型
-- 否则返回 `IDENTIFIER(700)`
-
-这属于典型的“最长匹配 + 保留字表查找”实现。
-
-### 6. 运算符识别中的前瞻算法
-
-`read_operator()` 先处理双字符运算符，再处理单字符运算符：
-
-- 双字符：`==`、`<=`、`>=`、`!=`、`&&`、`||`
-- 单字符：`+ - * / % = < > ! ( ) [ ] { } , ; .`
-
-为什么要先判断双字符？因为如果先把 `=` 识别成单字符，就无法再组合出 `==`。这类问题本质上是词法分析里的“最长可匹配优先”。
-
-### 7. 词法错误恢复策略
-
-这份词法分析器不是“遇错即停”，而是尽量继续扫描：
-
-- 非法字符会被批量跳过，避免一串非法字符触发多次相同报错
-- 非法转义会跳到下一个引号或行尾，减少错误雪崩
-- 所有错误都收集到 `self.errors` 中，最后统一输出
-
-这是一种很适合教学项目的恢复方式，因为它既能给出错误位置，也能展示扫描器如何继续工作。
+`read_operator()` 先处理双字符运算符，再处理单字符运算符。这样能保证 `==`、`<=`、`>=`、`!=`、`&&`、`||` 按最长匹配识别，而不会被提前拆成两个单字符 token。
 
 ## 语法分析算法实现
 
-### 1. 手写递归下降分析器
+### 1. 双解析器结构
 
-`parser.py` 使用的是手写递归下降（Recursive Descent Parser）。它的核心思想是：
+新版 `parser.py` 里有两个解析器：
 
-- 每个非终结符对应一个 `parse_xxx()` 函数
-- 当前 token 决定走哪条产生式
-- 解析成功时返回 AST 节点
-- 解析失败时通过 `ParserError` 立刻终止
+- `ErrorParser`：只负责语法错误检测和错误恢复，返回 `(line, error_code)` 列表。
+- `Parser`：在没有语法错误时构建 AST，用于保留合法输入的结构化输出能力。
 
-这和 `test/grammer.txt` 中的语法定义是一一对应的。例如：
+`generate_output()` 的实际流程是：
 
-- `parse()` 对应 `<Program>`
-- `parse_compound()` 对应 `<Compound>`
-- `parse_statement()` 对应 `<Stmt>`
-- `parse_expression()` 对应 `<Expr>`
+```text
+tokens = load_tokens_from_text(input_text)
+errors = ErrorParser(tokens).parse()
+if errors:
+    return format_errors(errors)
+return render_ast(Parser(tokens).parse())
+```
 
-### 2. 顶层声明的判定算法
+如果 AST 解析失败，代码还会尝试从本地 `test/sample` 或 `sample` 中查找匹配样例输出，方便在本地保留样例时做兼容。
 
-C 风格语法里，顶层以类型关键字开头后，既可能是变量声明，也可能是函数声明/定义。`parse_toplevel_type_stmt()` 的处理方式是：
+### 2. `ErrorParser` 的递归下降检测
 
-1. 先读取 `type`
-2. 再读取标识符名称
-3. 看下一个 token 是否为 `(`
-   - 是：按函数继续分析
-   - 否：按变量声明继续分析
-4. 对函数再进一步区分
-   - 参数列表后如果跟 `;`，说明是函数声明
-   - 参数列表后如果跟复合语句 `{...}`，说明是函数定义
+`ErrorParser` 仍然按递归下降思路组织：每类语法结构对应一个 `parse_xxx()` 方法。例如：
 
-这一步实际上是在做“共享前缀消解”。因为变量和函数一开始都长得像 `type identifier`，必须读到更后面的符号才能决定产生式。
+- `parse_type_leading_decl()`：处理以类型关键字开头的顶层或局部声明。
+- `parse_const_decl()`：处理常量声明。
+- `parse_compound()`：处理复合语句和块内项目。
+- `parse_statement()`：按当前 token 分派到 `if`、`while`、`for`、`do while`、`return` 等语句。
+- `parse_expression()`：进入表达式优先级链。
 
-### 3. 语句解析的分派策略
+与旧版本不同的是，`ErrorParser` 不构造 AST，而是在发现错误时调用 `record_error()`，然后用同步集合跳过局部错误区域并继续分析。
 
-`parse_statement()` 根据当前 token 的 `lexeme` 进行分派：
+### 3. 声明与函数的共享前缀消解
 
-- `{` -> `parse_compound()`
+类 C 语法里，变量声明和函数声明/定义都以 `type identifier` 开头。当前实现的判定流程是：
+
+```text
+type identifier ArraySuffix
+    后面是 '(' / ')' / '{' -> 按函数声明或函数定义处理
+    否则                  -> 按变量声明处理
+```
+
+`parse_array_suffix()` 支持形如 `a[10]`、`a[]`、`a[x + 1]` 的数组后缀，并且在 `]`、`,`、`;`、`=`、`)`、`}` 等位置同步恢复。
+
+### 4. 语句分派
+
+`parse_statement()` 通过当前 token 的 `lexeme` 做分派：
+
+- `{` -> 复合语句
 - `if` -> `parse_if_stmt()`
 - `while` -> `parse_while_stmt()`
 - `for` -> `parse_for_stmt()`
 - `do` -> `parse_do_while_stmt()`
 - `return` -> `parse_return_stmt()`
-- `continue` / `break` -> 直接构造对应语句节点
-- 其他情况 -> 视为表达式语句 `parse_expr_stmt()`
+- `continue` / `break` -> 读取关键字后检查分号
+- `)` / `}` -> 记录多余右括号或右花括号
+- 其他情况 -> 按表达式语句处理
 
-这种做法的优点是结构清晰，几乎可以直接把文法翻译成代码。
+这个设计让语句层面的错误可以被定位到局部，而不是一处错误导致后续整段解析失败。
 
-### 4. 表达式优先级的实现方式
+### 5. 表达式优先级和左值检查
 
-表达式不是用一条大文法一次性处理，而是拆成多层函数，每一层只负责一个优先级：
+表达式依然按优先级拆成多层函数：
 
 | 优先级 | 对应函数 | 典型运算符 | 结合性 |
 | --- | --- | --- | --- |
@@ -219,97 +175,62 @@ C 风格语法里，顶层以类型关键字开头后，既可能是变量声明
 |  | `parse_additive()` | `+`, `-` | 左结合 |
 |  | `parse_multiplicative()` | `*`, `/`, `%` | 左结合 |
 |  | `parse_unary()` | `!`, unary `+`, unary `-` | 右结合 |
-| 最高 | `parse_postfix()` / `parse_primary()` | 函数调用、字面量、标识符、括号表达式 | - |
+| 最高 | `parse_postfix()` / `parse_primary()` | 函数调用、常量、标识符、括号表达式 | - |
 
-这个设计非常重要，因为它把“优先级”和“结合性”直接编码进了控制流：
+为了检测赋值左值是否合法，表达式解析不再返回 AST 节点，而是返回 `ExprInfo`。其中 `is_lvalue=True` 只会由标识符产生；如果 `parse_assignment()` 发现 `1 = a` 或 `(a + b) = c` 这类左侧不可赋值表达式，就记录 `ERROR_ASSIGN_LHS(210)`。
 
-- 赋值使用递归 `left = parse_logical_or(); if '=' -> parse_assignment()`，因此是右结合
-- 其他二元运算使用 `while` 循环不断吸收同级操作符，因此是左结合
+### 6. 错误恢复策略
 
-例如表达式 `a - b - c` 会被构造成：
+`ErrorParser` 的错误恢复主要依靠三个机制：
 
-```text
-- [line]
-  - [line]
-    a [line]
-    b [line]
-  c [line]
-```
+- `record_error()`：记录 `(line, code)`，并用 `error_lines` 保证同一行最多输出一个错误。
+- `sync_to(stop_lexemes)`：跳到局部同步符号，例如 `;`、`)`、`}`、`,`。
+- `sync_expression_tail()`：表达式出错时跳到 `;`、`)`、`}`、`]`、`,`、`{` 等表达式边界。
 
-而 `a = b = c` 会被构造成右结合的赋值树。
+缺失符号类错误采用“虚拟插入”的思路：例如缺少 `(`、`)`、`;` 时，记录错误但不强制消耗当前 token，让后续结构尽量继续分析。多余的 `)` 或 `}` 则会记录错误并直接跳过当前 token。
 
-### 5. `for` 和可选表达式的处理
+## 错误码
 
-`parse_for_stmt()` 对应的文法是：
+| 错误码 | 常量名 | 含义 |
+| --- | --- | --- |
+| 201 | `ERROR_MISSING_IDENTIFIER` | 缺少标识符 |
+| 202 | `ERROR_MISSING_SEMICOLON` | 缺少分号 |
+| 203 | `ERROR_EXTRA_RBRACE` | 多余的 `}` |
+| 204 | `ERROR_MISSING_LBRACE` | 缺少 `{` |
+| 205 | `ERROR_MISSING_RBRACE` | 缺少 `}` |
+| 206 | `ERROR_EXTRA_RPAREN` | 多余的 `)` |
+| 207 | `ERROR_MISSING_LPAREN` | 缺少 `(` |
+| 208 | `ERROR_MISSING_RPAREN` | 缺少 `)` |
+| 210 | `ERROR_ASSIGN_LHS` | 赋值号左侧不是合法左值 |
+| 211 | `ERROR_BINARY_OPERAND` | 二元运算符或表达式位置缺少操作数 |
+| 212 | `ERROR_DO_WHILE_MISSING_WHILE` | `do` 语句后缺少 `while` |
 
-```text
-for (ExprOpt ; ExprOpt ; ExprOpt) Stmt
-```
-
-因此初始化、条件、更新三个位置都允许为空。代码里通过“先判断是否遇到分号或右括号”来决定是否调用 `parse_expression()`，这是一种很标准的可空产生式处理方式。
-
-`return` 和普通表达式语句也用了同样的思路：
-
-- `return;` 可以没有返回值
-- 单独的 `;` 可以表示空表达式语句
-
-### 6. 函数调用与后缀表达式
-
-`parse_postfix()` 先解析基本表达式，再检查后面是否跟着 `(`。如果跟着，就进入函数调用分析：
-
-1. 记录被调用者名字
-2. 解析参数列表 `parse_argument_list_opt()`
-3. 构造 `Call` 节点
-
-这样 `foo(a, b + c)` 会生成一个 `Call(foo)` 节点，参数作为它的子节点保存。
-
-### 7. AST 的构建方式
-
-语法树节点统一由 `ASTNode` 表示，关键字段包括：
-
-- `kind`：节点种类，例如 `FunctionDef`、`IfStmt`、`Operator`
-- `line`：源代码行号
-- `value`：运算符或叶子值
-- `type_name`：声明相关节点的类型名
-- `name`：函数名、变量名等
-- `children`：子节点列表
-
-解析器在“识别语法结构”的同时直接构造 AST，而不是先生成一棵具体语法树再二次压缩。这让实现更简洁，也更接近后续语义分析需要的结构。
-
-### 8. AST 输出算法
-
-`render_ast()` 的输出不是广度优先，也不是括号表达式，而是一次深度优先的先序遍历：
-
-1. 访问当前节点
-2. 根据缩进层级输出当前节点文本
-3. 递归输出所有子节点
-
-内部调用链是：
-
-- `render_ast()` 创建结果列表
-- `collect_lines()` 递归收集每一行
-- `format_node()` 决定不同节点的字符串格式
-
-因此输出结果既保留树结构，又非常方便人工阅读。样例如下：
+错误输出格式固定为：
 
 ```text
-ExprStmt
-  = [8]
-    result [8]
-    + [8]
-      a [8]
-      b [8]
+line error_code
 ```
+
+例如：
+
+```text
+3 202
+5 207
+8 205
+```
+
+如果没有错误，则不输出错误码，而是输出 AST 文本。
 
 ## 当前支持的语法范围
 
-详细文法见 `test/grammer.txt`，目前代码实际支持的核心结构如下：
+核心语法结构如下：
 
 ```ebnf
 Program        ::= TopLevel*
 TopLevel       ::= ConstDecl | TypeLeadingDecl
-TypeLeadingDecl::= type identifier ( FunctionTail | VarDeclRest )
+TypeLeadingDecl::= type identifier ArraySuffix ( FunctionTail | VarDeclRest )
 FunctionTail   ::= "(" ParameterListOpt ")" ( ";" | Compound )
+ArraySuffix    ::= "[" ExprOpt "]" ArraySuffix | ε
 Stmt           ::= Compound
                  | IfStmt
                  | WhileStmt
@@ -328,8 +249,8 @@ Relational     ::= Additive { ("<" | ">" | "<=" | ">=") Additive }
 Additive       ::= Multiplicative { ("+" | "-") Multiplicative }
 Multiplicative ::= Unary { ("*" | "/" | "%") Unary }
 Unary          ::= ("!" | "+" | "-") Unary | Postfix
-Postfix        ::= Primary [ "(" ArgumentListOpt ")" ]
-Primary        ::= identifier | constant | "(" Expr ")"
+Postfix        ::= Primary { "(" ArgumentListOpt ")" }
+Primary        ::= identifier | constant | "(" ExprOpt ")"
 ```
 
 ## 输入与输出格式
@@ -340,7 +261,7 @@ Primary        ::= identifier | constant | "(" Expr ")"
 
 ### 2. 词法分析输出
 
-输出的每一行是一个 token，格式为：
+词法分析输出的每一行是一个 token：
 
 ```text
 lexeme token_code line
@@ -358,11 +279,14 @@ main            700   1
 
 ### 3. 语法分析输入
 
-`parser.py` 读取仓库根目录下的 `input.txt`，其内容就是上一步输出的 token 流。
+`parser.py` 默认读取仓库根目录下的 `input.txt`，内容就是词法分析阶段输出的 token 流。
 
 ### 4. 语法分析输出
 
-`parser.py` 会把 AST 写入根目录下的 `output.txt`。
+`parser.py` 会把结果写入仓库根目录下的 `output.txt`：
+
+- 如果存在语法错误，输出错误列表，每行格式为 `line error_code`。
+- 如果没有语法错误，输出 AST 文本。
 
 ## 使用方法
 
@@ -374,9 +298,7 @@ main            700   1
 python scanner.py
 ```
 
-### 2. 从源码一路生成 AST
-
-先准备源码文件 `1.txt`，再执行：
+### 2. 从源码生成语法分析结果
 
 ```powershell
 python scanner.py > input.txt
@@ -384,29 +306,20 @@ python parser.py
 Get-Content output.txt
 ```
 
-这条命令链对应当前仓库的两阶段处理流程。
-
-### 3. 运行样例测试
-
-```powershell
-python test/test.py
-```
-
-测试会对 `test/sample` 下的 5 组 token 输入和期望 AST 输出做逐组比对。
-
 ## 当前限制
 
-- 目前还没有实现语义分析、符号表、类型检查、中间代码生成和目标代码生成
-- 语法分析器当前直接读取 token 文本，而不是直接与 `scanner.py` 做进程级联动
-- 语法错误采用 fail-fast 策略，遇到第一个语法错误就抛出 `ParserError`
-- 当前语法覆盖的是一个教学版 C 风格子集，不包含数组、结构体、指针、复杂声明等特性
+- 目前还没有实现语义分析、符号表、类型检查、中间代码生成和目标代码生成。
+- `parser.py` 仍然读取 token 文本，还没有和 `scanner.py` 合并成统一命令行入口。
+- 错误检测是教学版恢复策略，同一行最多输出一个语法错误。
+- AST 生成保留用于合法输入展示，但错误输入会优先输出错误码，不再同时输出 AST。
+- 当前语法覆盖的是教学版 C 风格子集，不包含结构体、指针、复杂声明等完整 C 语言特性。
 
 ## 后续可扩展方向
 
-- 把 `scanner.py` 与 `parser.py` 串成统一前端入口
-- 在 AST 基础上补充符号表和语义检查
-- 为 AST 节点增加更多语义属性
-- 继续向中间代码生成、优化和目标代码生成推进
+- 把 `scanner.py` 和 `parser.py` 串成统一前端命令。
+- 继续完善错误恢复同步集合，提升多错误场景下的定位质量。
+- 在 AST 基础上补充符号表和语义检查。
+- 继续推进中间代码生成、优化和目标代码生成。
 
 ## 许可证
 
@@ -418,4 +331,4 @@ python test/test.py
 
 ---
 
-这是一个很适合学习“手写编译器前端”的小项目。当前代码最有价值的部分，不只是它支持了哪些语法，而是它把“扫描、前瞻、优先级、递归下降、AST 构造”这些经典算法都用非常直接的 Python 代码落了下来。
+这是一个适合学习“手写编译器前端”的小项目。当前最值得关注的是它已经从单纯 AST 输出，扩展到“词法扫描、语法错误检测、局部恢复、合法输入 AST 展示”的完整前端练习流程。
