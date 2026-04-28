@@ -931,7 +931,7 @@ def format_node(node):
     if node.kind == "Call":
         return "Call(%s)[%s]" % (node.name, node.line)
     if node.kind == "Operator" and node.value == "!":
-        return "![%s]" % node.line
+        return "! [%s]" % node.line
     if node.kind in {"Operator", "Leaf"}:
         return "%s[%s]" % (node.value, node.line)
     raise ValueError("unknown AST node kind: %s" % node.kind)
