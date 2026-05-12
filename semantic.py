@@ -27,6 +27,9 @@ STATEMENT_KINDS = {
     "ReturnStmt",
     "ContinueStmt",
     "BreakStmt",
+    "InputStmt",
+    "OutputStmt",
+    "Empty",
 }
 DECL_KINDS = {"ConstDecl", "VarDecl"}
 OPERATOR_SET = {"=", "||", "&&", "==", "!=", "<", ">", "<=", ">=", "+", "-", "*", "/", "%", "!"}
@@ -62,7 +65,7 @@ ARITHMETIC_NODE_NAMES = {
 IDENTIFIER_RE = re.compile(r"[A-Za-z_]\w*")
 INT_LITERAL_RE = re.compile(r"[+-]?(?:0|[1-9]\d*|0[xX][0-9A-Fa-f]+|0[0-7]+)")
 FLOAT_LITERAL_RE = re.compile(r"[+-]?(?:(?:\d+\.\d*|\d*\.\d+)(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)")
-NODE_WITH_LINE_RE = re.compile(r"^(ReturnStmt|ContinueStmt|BreakStmt)\[(\d+)\]$")
+NODE_WITH_LINE_RE = re.compile(r"^(ReturnStmt|ContinueStmt|BreakStmt|InputStmt|OutputStmt)\[(\d+)\]$")
 DECL_RE = re.compile(r"^(FunctionDecl|FunctionDef|VarDecl|ConstDecl|Param)\(([^()\s]+)\s+([^)]+)\)\[(\d+)\]$")
 CALL_RE = re.compile(r"^Call\((.+)\)\[(\d+)\]$")
 VALUE_RE = re.compile(r"^(.*?)\s*\[(\d+)\]$")
@@ -163,7 +166,18 @@ def parse_ast_text(input_text: str) -> ASTNode:
 def parse_ast_line(text: str) -> ASTNode:
     text = text.lstrip("\ufeff")
 
-    if text in {"Program", "Compound", "IfStmt", "WhileStmt", "ForStmt", "DoWhileStmt", "ExprStmt"}:
+    if text in {
+        "Program",
+        "Compound",
+        "IfStmt",
+        "WhileStmt",
+        "ForStmt",
+        "DoWhileStmt",
+        "ExprStmt",
+        "InputStmt",
+        "OutputStmt",
+        "Empty",
+    }:
         return ASTNode(kind=text)
 
     match = NODE_WITH_LINE_RE.match(text)
@@ -331,6 +345,17 @@ class SemanticAnalyzer:
                 self.analyze_expression(node.children[0], scope)
             return False
 
+        if node.kind == "InputStmt":
+            self.handle_input(node, scope)
+            return False
+
+        if node.kind == "OutputStmt":
+            self.handle_output(node, scope)
+            return False
+
+        if node.kind == "Empty":
+            return False
+
         if node.kind == "ReturnStmt":
             self.handle_return(node, scope, context)
             return False
@@ -378,6 +403,25 @@ class SemanticAnalyzer:
             self.analyze_expression(node, scope)
 
         return False
+
+    def handle_input(self, node: ASTNode, scope: Scope) -> None:
+        for child in node.children:
+            result = self.analyze_expression(child, scope)
+            if result.symbol is None:
+                continue
+            if not result.is_lvalue or result.symbol.kind == "const":
+                self.record_error(child.line or node.line, ERROR_ASSIGN_TO_CONST)
+                continue
+            if result.type_name not in {"int", "char"}:
+                self.record_error(child.line or node.line, ERROR_OPERAND_TYPE)
+
+    def handle_output(self, node: ASTNode, scope: Scope) -> None:
+        for child in node.children:
+            result = self.analyze_expression(child, scope)
+            if result.type_name is None:
+                continue
+            if result.type_name not in {"int", "char"}:
+                self.record_error(child.line or node.line, ERROR_OPERAND_TYPE)
 
     def handle_loop_body(
         self,

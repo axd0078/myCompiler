@@ -8,6 +8,20 @@ CONSTANT_CODES = {400, 500, 600, 800}
 EOF_CODE = 0
 TYPE_KEYWORDS = {"int", "float", "char", "void"}
 RELATIONAL_OPERATORS = {"<", ">", "<=", ">=", "==", "!="}
+UNSUPPORTED_CPP_KEYWORDS = {
+    "class",
+    "struct",
+    "template",
+    "typename",
+    "public",
+    "private",
+    "protected",
+    "new",
+    "delete",
+    "try",
+    "catch",
+    "throw",
+}
 
 
 class Token:
@@ -75,6 +89,9 @@ class Lexer:
         "!=": 216,
         "&&": 217,
         "||": 218,
+        "<<": 221,
+        ">>": 222,
+        "::": 223,
     }
 
     def __init__(self, source: str):
@@ -135,6 +152,10 @@ class Lexer:
         while not self.at_end():
             if self.current() in " \t\r\n":
                 self.advance()
+                continue
+            if self.current() == "#":
+                while not self.at_end() and self.current() != "\n":
+                    self.advance()
                 continue
             if self.current() == "/" and self.peek() == "/":
                 while not self.at_end() and self.current() != "\n":
@@ -210,7 +231,7 @@ class Lexer:
             return None
 
         self.advance()
-        return Token(value, 500, line)
+        return Token("'" + value + "'", 500, line)
 
     def read_string(self) -> Optional[Token]:
         line = self.line
@@ -234,7 +255,7 @@ class Lexer:
             return None
 
         self.advance()
-        return Token("".join(chars), 600, line)
+        return Token('"' + "".join(chars) + '"', 600, line)
 
     def read_operator(self) -> Optional[Token]:
         line = self.line
@@ -262,18 +283,33 @@ class Parser:
     def parse(self) -> ASTNode:
         children: List[ASTNode] = []
         while not self.is_eof():
-            if self.current().lexeme == "const":
+            if self.current().lexeme == "using":
+                self.parse_using_directive()
+            elif self.current().lexeme == "const":
                 children.extend(self.parse_const_decl())
             elif self.is_type_token(self.current()):
                 children.extend(self.parse_toplevel_type_stmt())
+            elif self.current().lexeme == "std":
+                self.error("std:: prefixes are not supported; use 'using namespace std;'")
+            elif self.current().lexeme in UNSUPPORTED_CPP_KEYWORDS:
+                self.error("unsupported C++ feature '%s'" % self.current().lexeme)
             else:
                 self.error("unexpected token at top level")
         return ASTNode("Program", children=children)
 
+    def parse_using_directive(self) -> None:
+        self.expect("using")
+        self.expect("namespace")
+        name = self.expect_identifier()
+        if name.lexeme != "std":
+            self.error("only 'using namespace std;' is supported")
+        self.expect(";")
+
     def parse_toplevel_type_stmt(self) -> List[ASTNode]:
         type_token = self.expect_type()
         name_token = self.expect_identifier()
-        self.parse_array_suffix()
+        is_array = self.parse_array_suffix()
+        type_name = self.array_type(type_token.lexeme, is_array)
         if self.match("("):
             params = self.parse_parameter_list_opt()
             self.expect(")")
@@ -282,7 +318,7 @@ class Parser:
                     ASTNode(
                         "FunctionDecl",
                         line=name_token.line,
-                        type_name=type_token.lexeme,
+                        type_name=type_name,
                         name=name_token.lexeme,
                         children=params,
                     )
@@ -292,12 +328,12 @@ class Parser:
                 ASTNode(
                     "FunctionDef",
                     line=name_token.line,
-                    type_name=type_token.lexeme,
+                    type_name=type_name,
                     name=name_token.lexeme,
                     children=params + [body],
                 )
             ]
-        return self.parse_var_decl_rest(type_token.lexeme, name_token)
+        return self.parse_var_decl_rest(type_name, name_token)
 
     def parse_parameter_list_opt(self) -> List[ASTNode]:
         params: List[ASTNode] = []
@@ -306,12 +342,12 @@ class Parser:
         while True:
             type_token = self.expect_type()
             name_token = self.expect_identifier()
-            self.parse_array_suffix()
+            is_array = self.parse_array_suffix()
             params.append(
                 ASTNode(
                     "Param",
                     line=name_token.line,
-                    type_name=type_token.lexeme,
+                    type_name=self.array_type(type_token.lexeme, is_array),
                     name=name_token.lexeme,
                 )
             )
@@ -330,13 +366,13 @@ class Parser:
 
     def parse_const_item(self, type_name: str) -> ASTNode:
         name_token = self.expect_identifier()
-        self.parse_array_suffix()
+        is_array = self.parse_array_suffix()
         self.expect("=")
         expr = self.parse_expression()
         return ASTNode(
             "ConstDecl",
             line=name_token.line,
-            type_name=type_name,
+            type_name=self.array_type(type_name, is_array),
             name=name_token.lexeme,
             children=[expr],
         )
@@ -350,23 +386,32 @@ class Parser:
         return decls
 
     def parse_var_item(self, type_name: str, name_token: Token) -> ASTNode:
-        self.parse_array_suffix()
+        is_array = self.parse_array_suffix()
         children: List[ASTNode] = []
         if self.match("="):
             children.append(self.parse_expression())
         return ASTNode(
             "VarDecl",
             line=name_token.line,
-            type_name=type_name,
+            type_name=self.array_type(type_name, is_array),
             name=name_token.lexeme,
             children=children,
         )
 
-    def parse_array_suffix(self) -> None:
+    def parse_array_suffix(self) -> bool:
+        is_array = False
         while self.match("["):
+            is_array = True
             if self.current().lexeme != "]":
                 self.parse_expression()
             self.expect("]")
+        return is_array
+
+    @staticmethod
+    def array_type(type_name: str, is_array: bool) -> str:
+        if is_array:
+            return type_name + "[]"
+        return type_name
 
     def parse_compound(self) -> ASTNode:
         self.expect("{")
@@ -392,6 +437,12 @@ class Parser:
         lexeme = self.current().lexeme
         if lexeme == "{":
             return self.parse_compound()
+        if lexeme == "cin":
+            return self.parse_input_stmt()
+        if lexeme == "cout":
+            return self.parse_output_stmt()
+        if lexeme == "std":
+            self.error("std:: prefixes are not supported; use 'using namespace std;'")
         if lexeme == "if":
             return self.parse_if_stmt()
         if lexeme == "while":
@@ -410,7 +461,34 @@ class Parser:
             token = self.advance()
             self.expect(";")
             return ASTNode("BreakStmt", line=token.line)
+        if lexeme in UNSUPPORTED_CPP_KEYWORDS:
+            self.error("unsupported C++ feature '%s'" % lexeme)
         return self.parse_expr_stmt()
+
+    def parse_input_stmt(self) -> ASTNode:
+        token = self.expect("cin")
+        children: List[ASTNode] = []
+        if not self.match(">>"):
+            self.error("expected '>>' after cin")
+        while True:
+            target = self.expect_identifier()
+            children.append(ASTNode("Leaf", value=target.lexeme, line=target.line))
+            if not self.match(">>"):
+                break
+        self.expect(";")
+        return ASTNode("InputStmt", line=token.line, children=children)
+
+    def parse_output_stmt(self) -> ASTNode:
+        token = self.expect("cout")
+        children: List[ASTNode] = []
+        if not self.match("<<"):
+            self.error("expected '<<' after cout")
+        while True:
+            children.append(self.parse_expression())
+            if not self.match("<<"):
+                break
+        self.expect(";")
+        return ASTNode("OutputStmt", line=token.line, children=children)
 
     def parse_if_stmt(self) -> ASTNode:
         self.expect("if")
@@ -441,9 +519,10 @@ class Parser:
         self.expect(";")
         step = self.parse_expr_opt()
         self.expect(")")
-        for node in (init, cond, step):
-            if node is not None:
-                children.append(node)
+        if init is None or cond is None or step is None:
+            children.extend(node if node is not None else ASTNode("Empty") for node in (init, cond, step))
+        else:
+            children.extend([init, cond, step])
         children.append(self.parse_statement())
         return ASTNode("ForStmt", children=children)
 
@@ -697,6 +776,12 @@ class IntermediateCodeGenerator:
     def generate_statement(self, node: ASTNode) -> None:
         if node.kind == "Compound":
             self.generate_compound(node)
+        elif node.kind == "InputStmt":
+            for target in node.children:
+                self.emit("in", "_", "_", self.expression_place(target))
+        elif node.kind == "OutputStmt":
+            for child in node.children:
+                self.emit("out", self.generate_expression(child), "_", "_")
         elif node.kind == "ExprStmt":
             if node.children:
                 self.generate_expression(node.children[0])
@@ -761,9 +846,9 @@ class IntermediateCodeGenerator:
     def generate_for(self, node: ASTNode) -> None:
         body = node.children[-1] if node.children else None
         expressions = node.children[:-1]
-        init = expressions[0] if len(expressions) >= 1 else None
-        condition = expressions[1] if len(expressions) >= 2 else None
-        step = expressions[2] if len(expressions) >= 3 else None
+        init = expressions[0] if len(expressions) >= 1 and expressions[0].kind != "Empty" else None
+        condition = expressions[1] if len(expressions) >= 2 and expressions[1].kind != "Empty" else None
+        step = expressions[2] if len(expressions) >= 3 and expressions[2].kind != "Empty" else None
 
         if init is not None:
             self.generate_expression(init)
@@ -834,6 +919,9 @@ class IntermediateCodeGenerator:
                 self.backpatch([target], context.continue_target)
 
     def generate_expression(self, node: ASTNode) -> str:
+        if node.kind == "Empty":
+            return "_"
+
         if node.kind == "Leaf":
             return node.value or "_"
 
