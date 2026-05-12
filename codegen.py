@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Sequence
 
 SUPPORTED_VALUE_TYPES = {"int", "char"}
 SUPPORTED_RETURN_TYPES = {"int", "char", "void"}
+BUILTIN_FUNCTIONS = {"abs", "llabs", "min", "max"}
 RELATIONAL_JUMPS = {
     "==": "sete",
     "!=": "setne",
@@ -84,6 +85,7 @@ class AssemblyGenerator:
         self.globals: Dict[str, VariableInfo] = {}
         self.global_order: List[VariableInfo] = []
         self.global_nodes: Dict[str, object] = {}
+        self.string_literals: Dict[str, str] = {}
         self.lines: List[str] = []
         self.current: Optional[FunctionFrame] = None
 
@@ -92,6 +94,7 @@ class AssemblyGenerator:
             raise CodegenError("AST root must be Program", root.line)
 
         self.collect_toplevel(root.children)
+        self.collect_string_literals(root)
         self.lines = []
         self.emit_header()
         self.emit_globals()
@@ -152,9 +155,21 @@ class AssemblyGenerator:
                 '    .asciz "%d"',
                 ".Lfmt_write_char:",
                 '    .asciz "%c"',
-                "",
+                ".Lfmt_write_string:",
+                '    .asciz "%s"',
             ]
         )
+        for literal, label in self.string_literals.items():
+            self.lines.append("%s:" % label)
+            self.lines.append("    .asciz %s" % literal)
+        self.lines.append("")
+
+    def collect_string_literals(self, node) -> None:
+        if node.kind == "Leaf" and self.is_string_literal(node.value or ""):
+            if node.value not in self.string_literals:
+                self.string_literals[node.value or ""] = ".Lstr_%d" % len(self.string_literals)
+        for child in node.children:
+            self.collect_string_literals(child)
 
     def emit_globals(self) -> None:
         if not self.global_order:
@@ -365,8 +380,20 @@ class AssemblyGenerator:
     def emit_output(self, node) -> None:
         for child in node.children:
             type_name = self.expression_type(child)
-            if type_name not in SUPPORTED_VALUE_TYPES:
-                raise CodegenError("cout supports only int and char expressions", child.line or node.line)
+            if type_name not in SUPPORTED_VALUE_TYPES and type_name != "string":
+                raise CodegenError(
+                    "cout supports only int, char, and string expressions",
+                    child.line or node.line,
+                )
+            if type_name == "string":
+                label = self.string_literals.get(child.value or "")
+                if label is None:
+                    raise CodegenError("unknown string literal", child.line or node.line)
+                self.lines.append("    lea rdx, %s[rip]" % label)
+                self.lines.append("    lea rcx, .Lfmt_write_string[rip]")
+                self.lines.append("    xor eax, eax")
+                self.lines.append("    call printf")
+                continue
             self.emit_expression(child)
             self.lines.append("    mov edx, eax")
             fmt = ".Lfmt_write_char" if type_name == "char" else ".Lfmt_write_int"
@@ -566,6 +593,9 @@ class AssemblyGenerator:
 
     def emit_call(self, node) -> None:
         name = node.name or ""
+        if name in BUILTIN_FUNCTIONS:
+            self.emit_builtin_call(node)
+            return
         info = self.functions.get(name)
         if info is None:
             raise CodegenError("function '%s' is not declared" % name, node.line)
@@ -594,6 +624,39 @@ class AssemblyGenerator:
 
         frame.temp_depth = base_depth
         self.lines.append("    call %s" % name)
+
+    def emit_builtin_call(self, node) -> None:
+        name = node.name or ""
+        if name in {"abs", "llabs"}:
+            if len(node.children) != 1:
+                raise CodegenError("builtin '%s' expects one argument" % name, node.line)
+            done_label = self.new_label("abs_done")
+            self.emit_expression(node.children[0])
+            self.lines.append("    cmp eax, 0")
+            self.lines.append("    jge %s" % done_label)
+            self.lines.append("    neg eax")
+            self.lines.append("%s:" % done_label)
+            return
+
+        if name in {"min", "max"}:
+            if len(node.children) != 2:
+                raise CodegenError("builtin '%s' expects two arguments" % name, node.line)
+            slot = self.reserve_temp()
+            self.emit_expression(node.children[0])
+            self.lines.append("    cdqe")
+            self.lines.append("    mov QWORD PTR %s, rax" % self.temp_mem(slot))
+            self.emit_expression(node.children[1])
+            self.lines.append("    mov r10d, eax")
+            self.lines.append("    mov eax, DWORD PTR %s" % self.temp_mem(slot))
+            self.release_temp()
+            self.lines.append("    cmp eax, r10d")
+            if name == "min":
+                self.lines.append("    cmovg eax, r10d")
+            else:
+                self.lines.append("    cmovl eax, r10d")
+            return
+
+        raise CodegenError("unsupported builtin '%s'" % name, node.line)
 
     def emit_postfix(self, node) -> None:
         if not node.children or node.children[0].kind != "Leaf":
@@ -682,6 +745,8 @@ class AssemblyGenerator:
                 return "int"
             return self.lookup_variable(text, node.line).type_name
         if node.kind == "Call":
+            if node.name in BUILTIN_FUNCTIONS:
+                return "int"
             info = self.functions.get(node.name or "")
             return info.return_type if info is not None else None
         if node.kind == "Postfix":

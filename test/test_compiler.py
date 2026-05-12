@@ -157,6 +157,23 @@ int main() {
         self.assertEqual(result.returncode, 10)
         self.assertEqual(result.stdout, "10\n")
 
+    def test_string_output_and_builtin_abs_min_max(self):
+        result = self.compile_and_run(
+            """\
+#include <bits/stdc++.h>
+using namespace std;
+int main() {
+    int a = abs(3 - 8);
+    int b = min(a, 4);
+    int c = max(b, 6);
+    cout << "v=" << c << endl;
+    return c;
+}
+"""
+        )
+        self.assertEqual(result.returncode, 6)
+        self.assertEqual(result.stdout, "v=6\n")
+
     def test_unsupported_float_reports_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             source_path = Path(tmp) / "bad.cpp"

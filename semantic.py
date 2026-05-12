@@ -34,6 +34,7 @@ STATEMENT_KINDS = {
 DECL_KINDS = {"ConstDecl", "VarDecl"}
 OPERATOR_SET = {"=", "||", "&&", "==", "!=", "<", ">", "<=", ">=", "+", "-", "*", "/", "%", "!"}
 ARITHMETIC_OPERATORS = {"+", "-", "*", "/", "%"}
+BUILTIN_FUNCTION_ARITY = {"abs": 1, "llabs": 1, "min": 2, "max": 2}
 ARITHMETIC_NODE_NAMES = {
     "add",
     "addexpr",
@@ -423,7 +424,7 @@ class SemanticAnalyzer:
             result = self.analyze_expression(child, scope)
             if result.type_name is None:
                 continue
-            if result.type_name not in {"int", "char"}:
+            if result.type_name not in {"int", "char", "string"}:
                 self.record_error(child.line or node.line, ERROR_OPERAND_TYPE)
 
     def handle_loop_body(
@@ -531,6 +532,10 @@ class SemanticAnalyzer:
 
         if node.kind == "Call":
             args = [self.analyze_expression(child, scope) for child in node.children]
+            if node.name in BUILTIN_FUNCTION_ARITY:
+                if len(args) != BUILTIN_FUNCTION_ARITY[node.name or ""]:
+                    self.record_error(node.line, ERROR_ARGUMENT_COUNT)
+                return ExprResult(type_name=args[0].type_name if args else "int")
             function = self.functions.get(node.name or "")
             if function is None:
                 self.record_error(node.line, ERROR_FUNCTION_UNDECLARED)
