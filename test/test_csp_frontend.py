@@ -24,6 +24,9 @@ class CspFrontendCorpusTest(unittest.TestCase):
                 self.assertGreater(len(unit.tokens), 0)
                 self.assertIsNotNone(unit.skeleton)
                 self.assertTrue(unit.skeleton.has_main())
+                for function in unit.skeleton.functions:
+                    if function.has_body:
+                        self.assertIsNotNone(function.body)
 
     def test_detects_representative_csp_features(self):
         unit = load_translation_unit(CSP_ROOT / "41" / "3.cpp")
@@ -34,6 +37,10 @@ class CspFrontendCorpusTest(unittest.TestCase):
         self.assertTrue(unit.features.has_range_for)
         self.assertGreaterEqual(len(unit.skeleton.structs), 1)
         self.assertTrue(any(function.name == "main" for function in unit.skeleton.functions))
+        statement_counts = unit.skeleton.statement_kind_counts()
+        self.assertGreaterEqual(statement_counts.get("RangeForStmt", 0), 1)
+        self.assertGreaterEqual(statement_counts.get("InputStmt", 0), 1)
+        self.assertGreaterEqual(statement_counts.get("OutputStmt", 0), 1)
 
     def test_compile_dir_writes_report(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -56,6 +63,8 @@ class CspFrontendCorpusTest(unittest.TestCase):
             report = report_path.read_text(encoding="utf-8")
             self.assertIn("CSP compile report", report)
             self.assertIn("bits/stdc++.h: True", report)
+            self.assertIn("functions:", report)
+            self.assertIn("statements:", report)
 
 
 if __name__ == "__main__":

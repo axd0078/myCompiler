@@ -87,6 +87,9 @@ def compile_directory(source_dir: Path, output_dir: Path) -> int:
                 unit = load_translation_unit(source_path)
                 for line in unit.features.summary_lines():
                     report_lines.append("  %s" % line)
+                if unit.skeleton is not None:
+                    for line in unit.skeleton.summary_lines():
+                        report_lines.append("  %s" % line)
             except (OSError, CspFrontendError) as feature_exc:
                 report_lines.append("  feature scan failed: %s" % feature_exc)
             report_lines.append("")

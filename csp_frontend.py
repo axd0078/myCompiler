@@ -197,6 +197,7 @@ class CspFunction:
     parameter_tokens: List[str]
     has_body: bool
     body_token_count: int = 0
+    body: Optional["CspBlock"] = None
 
 
 @dataclass
@@ -214,6 +215,32 @@ class CspGlobalDecl:
 
 
 @dataclass
+class CspStatement:
+    kind: str
+    line: int
+    tokens: List[str] = field(default_factory=list)
+    children: List["CspStatement"] = field(default_factory=list)
+
+
+@dataclass
+class CspBlock:
+    line: int
+    statements: List[CspStatement] = field(default_factory=list)
+
+    def statement_kind_counts(self) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+
+        def visit(statement: CspStatement) -> None:
+            counts[statement.kind] = counts.get(statement.kind, 0) + 1
+            for child in statement.children:
+                visit(child)
+
+        for statement in self.statements:
+            visit(statement)
+        return counts
+
+
+@dataclass
 class CspSkeleton:
     functions: List[CspFunction] = field(default_factory=list)
     structs: List[CspStruct] = field(default_factory=list)
@@ -221,6 +248,29 @@ class CspSkeleton:
 
     def has_main(self) -> bool:
         return any(function.name == "main" and function.has_body for function in self.functions)
+
+    def statement_kind_counts(self) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for function in self.functions:
+            if function.body is None:
+                continue
+            for kind, count in function.body.statement_kind_counts().items():
+                counts[kind] = counts.get(kind, 0) + count
+        return counts
+
+    def summary_lines(self) -> List[str]:
+        defined_functions = sum(1 for function in self.functions if function.has_body)
+        counts = self.statement_kind_counts()
+        statement_summary = ", ".join(
+            "%s=%d" % (kind, counts[kind]) for kind in sorted(counts)
+        )
+        return [
+            "functions: %d defined / %d total" % (defined_functions, len(self.functions)),
+            "structs: %d" % len(self.structs),
+            "globals: %d" % len(self.globals),
+            "main: %s" % self.has_main(),
+            "statements: %s" % (statement_summary if statement_summary else "-"),
+        ]
 
 
 def preprocess_source(source: str) -> PreprocessResult:
@@ -584,9 +634,13 @@ class CspSkeletonParser:
         parameter_tokens = [token.lexeme for token in self.tokens[lparen + 1 : rparen]]
         has_body = self.tokens[body_start].lexeme == "{"
         body_token_count = 0
+        body = None
         if has_body:
             body_end = self.matching_index(body_start, "{", "}")
-            body_token_count = 0 if body_end is None else body_end - body_start - 1
+            if body_end is not None:
+                body_tokens = self.tokens[body_start + 1 : body_end]
+                body_token_count = len(body_tokens)
+                body = CspStatementParser(body_tokens, self.tokens[body_start].line).parse_block()
         return CspFunction(
             name=name,
             line=self.tokens[name_index].line,
@@ -594,6 +648,7 @@ class CspSkeletonParser:
             parameter_tokens=parameter_tokens,
             has_body=has_body,
             body_token_count=body_token_count,
+            body=body,
         )
 
     def collect_global_decls(self, start: int, end: int) -> None:
@@ -704,3 +759,262 @@ class CspSkeletonParser:
         if index >= len(self.tokens):
             return ""
         return self.tokens[index].lexeme
+
+
+class CspStatementParser:
+    TYPE_STARTERS = {
+        "auto",
+        "bool",
+        "char",
+        "const",
+        "double",
+        "float",
+        "int",
+        "long",
+        "short",
+        "signed",
+        "string",
+        "unsigned",
+    } | CONTAINER_NAMES
+
+    def __init__(self, tokens: Sequence[CppToken], block_line: int):
+        self.tokens = list(tokens)
+        self.block_line = block_line
+        self.pos = 0
+
+    def parse_block(self) -> CspBlock:
+        statements: List[CspStatement] = []
+        while self.pos < len(self.tokens):
+            if self.current_lexeme() == ";":
+                self.pos += 1
+                continue
+            statements.append(self.parse_statement())
+        return CspBlock(line=self.block_line, statements=statements)
+
+    def parse_statement(self) -> CspStatement:
+        token = self.current()
+        lexeme = token.lexeme
+        if lexeme == "{":
+            return self.parse_compound()
+        if lexeme == "if":
+            return self.parse_if()
+        if lexeme == "while":
+            return self.parse_while()
+        if lexeme == "for":
+            return self.parse_for()
+        if lexeme == "do":
+            return self.parse_do_while()
+        if lexeme == "return":
+            return self.parse_until_semicolon("ReturnStmt")
+        if lexeme == "break":
+            return self.parse_until_semicolon("BreakStmt")
+        if lexeme == "continue":
+            return self.parse_until_semicolon("ContinueStmt")
+        if self.is_iostream_start("cin", ">>"):
+            return self.parse_until_semicolon("InputStmt")
+        if self.is_iostream_start("cout", "<<"):
+            return self.parse_until_semicolon("OutputStmt")
+        if self.looks_like_declaration():
+            return self.parse_until_semicolon("DeclStmt")
+        return self.parse_until_semicolon("ExprStmt")
+
+    def parse_compound(self) -> CspStatement:
+        start = self.pos
+        end = self.matching_index(start, "{", "}")
+        if end is None:
+            raise CspFrontendError("Line %d: unclosed compound statement" % self.tokens[start].line)
+        inner = CspStatementParser(self.tokens[start + 1 : end], self.tokens[start].line).parse_block()
+        self.pos = end + 1
+        return CspStatement(
+            kind="CompoundStmt",
+            line=self.tokens[start].line,
+            tokens=self.lexemes(start, end + 1),
+            children=inner.statements,
+        )
+
+    def parse_if(self) -> CspStatement:
+        start = self.pos
+        self.pos += 1
+        condition = self.consume_parenthesized_tokens()
+        children: List[CspStatement] = []
+        if self.pos < len(self.tokens):
+            children.append(self.parse_statement())
+        if self.current_lexeme() == "else":
+            self.pos += 1
+            if self.pos < len(self.tokens):
+                children.append(self.parse_statement())
+        return CspStatement(
+            kind="IfStmt",
+            line=self.tokens[start].line,
+            tokens=["if"] + condition,
+            children=children,
+        )
+
+    def parse_while(self) -> CspStatement:
+        start = self.pos
+        self.pos += 1
+        condition = self.consume_parenthesized_tokens()
+        children = [self.parse_statement()] if self.pos < len(self.tokens) else []
+        return CspStatement(
+            kind="WhileStmt",
+            line=self.tokens[start].line,
+            tokens=["while"] + condition,
+            children=children,
+        )
+
+    def parse_for(self) -> CspStatement:
+        start = self.pos
+        self.pos += 1
+        header = self.consume_parenthesized_tokens()
+        children = [self.parse_statement()] if self.pos < len(self.tokens) else []
+        kind = "RangeForStmt" if self.has_top_level_colon(header) else "ForStmt"
+        return CspStatement(
+            kind=kind,
+            line=self.tokens[start].line,
+            tokens=["for"] + header,
+            children=children,
+        )
+
+    def parse_do_while(self) -> CspStatement:
+        start = self.pos
+        self.pos += 1
+        children = [self.parse_statement()] if self.pos < len(self.tokens) else []
+        trailer: List[str] = []
+        if self.current_lexeme() == "while":
+            trailer.append("while")
+            self.pos += 1
+            trailer.extend(self.consume_parenthesized_tokens())
+        if self.current_lexeme() == ";":
+            trailer.append(";")
+            self.pos += 1
+        return CspStatement(
+            kind="DoWhileStmt",
+            line=self.tokens[start].line,
+            tokens=["do"] + trailer,
+            children=children,
+        )
+
+    def parse_until_semicolon(self, kind: str) -> CspStatement:
+        start = self.pos
+        end = self.find_statement_end(start)
+        if end is None:
+            end = len(self.tokens) - 1
+            self.pos = len(self.tokens)
+        else:
+            self.pos = end + 1
+        return CspStatement(
+            kind=kind,
+            line=self.tokens[start].line,
+            tokens=self.lexemes(start, end + 1),
+        )
+
+    def consume_parenthesized_tokens(self) -> List[str]:
+        if self.current_lexeme() != "(":
+            return []
+        start = self.pos
+        end = self.matching_index(start, "(", ")")
+        if end is None:
+            raise CspFrontendError("Line %d: unclosed parenthesized header" % self.tokens[start].line)
+        self.pos = end + 1
+        return self.lexemes(start, end + 1)
+
+    def looks_like_declaration(self) -> bool:
+        lexeme = self.current_lexeme()
+        if lexeme in self.TYPE_STARTERS:
+            return True
+        token = self.current()
+        if token.kind != "identifier":
+            return False
+        next_lexeme = self.peek_lexeme(1)
+        next_kind = self.peek_kind(1)
+        if next_kind == "identifier":
+            return True
+        return next_lexeme in {"*", "&", "<", "::"}
+
+    def is_iostream_start(self, stream_name: str, operator: str) -> bool:
+        if self.current_lexeme() == stream_name and self.peek_lexeme(1) == operator:
+            return True
+        return (
+            self.current_lexeme() == "std"
+            and self.peek_lexeme(1) == "::"
+            and self.peek_lexeme(2) == stream_name
+            and self.peek_lexeme(3) == operator
+        )
+
+    def has_top_level_colon(self, lexemes: Sequence[str]) -> bool:
+        depth = {"(": 0, "[": 0, "{": 0, "<": 0}
+        for lexeme in lexemes:
+            if lexeme == "(":
+                depth["("] += 1
+            elif lexeme == ")" and depth["("] > 0:
+                depth["("] -= 1
+            elif lexeme == "[":
+                depth["["] += 1
+            elif lexeme == "]" and depth["["] > 0:
+                depth["["] -= 1
+            elif lexeme == "{":
+                depth["{"] += 1
+            elif lexeme == "}" and depth["{"] > 0:
+                depth["{"] -= 1
+            elif lexeme == "<":
+                depth["<"] += 1
+            elif lexeme == ">" and depth["<"] > 0:
+                depth["<"] -= 1
+            elif lexeme == ":" and depth == {"(": 1, "[": 0, "{": 0, "<": 0}:
+                return True
+        return False
+
+    def find_statement_end(self, start: int) -> Optional[int]:
+        depth = {"(": 0, "[": 0, "{": 0}
+        for index in range(start, len(self.tokens)):
+            lexeme = self.tokens[index].lexeme
+            if all(value == 0 for value in depth.values()) and lexeme == ";":
+                return index
+            if lexeme == "(":
+                depth["("] += 1
+            elif lexeme == ")" and depth["("] > 0:
+                depth["("] -= 1
+            elif lexeme == "[":
+                depth["["] += 1
+            elif lexeme == "]" and depth["["] > 0:
+                depth["["] -= 1
+            elif lexeme == "{":
+                depth["{"] += 1
+            elif lexeme == "}" and depth["{"] > 0:
+                depth["{"] -= 1
+        return None
+
+    def matching_index(self, start: int, open_lexeme: str, close_lexeme: str) -> Optional[int]:
+        depth = 0
+        for index in range(start, len(self.tokens)):
+            lexeme = self.tokens[index].lexeme
+            if lexeme == open_lexeme:
+                depth += 1
+            elif lexeme == close_lexeme:
+                depth -= 1
+                if depth == 0:
+                    return index
+        return None
+
+    def lexemes(self, start: int, end: int) -> List[str]:
+        return [token.lexeme for token in self.tokens[start:end]]
+
+    def current(self) -> CppToken:
+        return self.tokens[self.pos]
+
+    def current_lexeme(self) -> str:
+        if self.pos >= len(self.tokens):
+            return ""
+        return self.tokens[self.pos].lexeme
+
+    def peek_lexeme(self, distance: int) -> str:
+        index = self.pos + distance
+        if index >= len(self.tokens):
+            return ""
+        return self.tokens[index].lexeme
+
+    def peek_kind(self, distance: int) -> str:
+        index = self.pos + distance
+        if index >= len(self.tokens):
+            return ""
+        return self.tokens[index].kind
