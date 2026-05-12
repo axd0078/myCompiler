@@ -404,7 +404,10 @@ class AssemblyGenerator:
     def emit_for(self, node) -> None:
         init, condition, step, body = self.for_parts(node)
         if init is not None:
-            self.emit_expression(init)
+            if init.kind in {"VarDecl", "ConstDecl"}:
+                self.emit_declaration(init)
+            else:
+                self.emit_expression(init)
 
         start_label = self.new_label("for_start")
         step_label = self.new_label("for_step")
@@ -449,6 +452,9 @@ class AssemblyGenerator:
             return
         if node.kind == "Call":
             self.emit_call(node)
+            return
+        if node.kind == "Postfix":
+            self.emit_postfix(node)
             return
         if node.kind != "Operator":
             raise CodegenError("unsupported expression '%s'" % node.kind, node.line)
@@ -589,6 +595,25 @@ class AssemblyGenerator:
         frame.temp_depth = base_depth
         self.lines.append("    call %s" % name)
 
+    def emit_postfix(self, node) -> None:
+        if not node.children or node.children[0].kind != "Leaf":
+            raise CodegenError("increment target must be a variable", node.line)
+        variable = self.lookup_variable(node.children[0].value or "", node.line)
+        slot = self.reserve_temp()
+        self.load_variable(variable)
+        self.lines.append("    cdqe")
+        self.lines.append("    mov QWORD PTR %s, rax" % self.temp_mem(slot))
+        self.load_variable(variable)
+        if node.value == "++":
+            self.lines.append("    add eax, 1")
+        elif node.value == "--":
+            self.lines.append("    sub eax, 1")
+        else:
+            raise CodegenError("unsupported postfix operator '%s'" % node.value, node.line)
+        self.store_eax(variable)
+        self.lines.append("    mov eax, DWORD PTR %s" % self.temp_mem(slot))
+        self.release_temp()
+
     def load_variable(self, variable: VariableInfo) -> None:
         if variable.type_name == "char":
             self.lines.append("    movsx eax, %s" % self.byte_mem(variable))
@@ -659,6 +684,8 @@ class AssemblyGenerator:
         if node.kind == "Call":
             info = self.functions.get(node.name or "")
             return info.return_type if info is not None else None
+        if node.kind == "Postfix":
+            return self.expression_type(node.children[0]) if node.children else None
         if node.kind == "Operator":
             if node.value == "=" and node.children:
                 return self.expression_type(node.children[0])
@@ -708,6 +735,8 @@ class AssemblyGenerator:
         if node.kind == "Call":
             nested = [self.needed_temp_slots(child) for child in node.children]
             return len(node.children) + (max(nested) if nested else 0)
+        if node.kind == "Postfix":
+            return 1
         if node.kind == "Operator":
             if len(node.children) == 1:
                 return self.needed_temp_slots(node.children[0])

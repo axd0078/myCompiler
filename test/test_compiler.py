@@ -131,6 +131,32 @@ int main() {
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "Z\n")
 
+    def test_csp_style_loop_sugar(self):
+        result = self.compile_and_run(
+            """\
+#include <bits/stdc++.h>
+using namespace std;
+int main() {
+    ios::sync_with_stdio(false);
+    cin.tie(nullptr);
+    int n;
+    cin >> n;
+    int sum = 0;
+    for (int i = 0; i < n; i++) {
+        sum += i;
+    }
+    while (n--) {
+        sum += 1;
+    }
+    cout << sum << endl;
+    return sum;
+}
+""",
+            stdin="4\n",
+        )
+        self.assertEqual(result.returncode, 10)
+        self.assertEqual(result.stdout, "10\n")
+
     def test_unsupported_float_reports_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             source_path = Path(tmp) / "bad.cpp"

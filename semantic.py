@@ -379,7 +379,10 @@ class SemanticAnalyzer:
         if node.kind == "ForStmt":
             if node.children:
                 for child in node.children[:-1]:
-                    self.analyze_expression(child, scope)
+                    if child.kind in DECL_KINDS:
+                        self.handle_var_decl(child, scope)
+                    elif child.kind != "Empty":
+                        self.analyze_expression(child, scope)
                 body = node.children[-1]
                 return self.handle_loop_body(body, scope, context, loop_depth)
             return False
@@ -542,6 +545,14 @@ class SemanticAnalyzer:
                         break
             return ExprResult(type_name=function.return_type)
 
+        if node.kind == "Postfix":
+            if not node.children:
+                return ExprResult()
+            result = self.analyze_expression(node.children[0], scope)
+            if not result.is_lvalue or (result.symbol is not None and result.symbol.kind == "const"):
+                self.record_error(node.line, ERROR_ASSIGN_TO_CONST)
+            return ExprResult(type_name=result.type_name)
+
         if node.kind != "Operator":
             return ExprResult()
 
@@ -637,6 +648,8 @@ class SemanticAnalyzer:
             return True
         if node.kind != "Leaf":
             return True
+        if self.lookup_symbol(scope, node.value or "") is not None:
+            return False
         return self.detect_literal_type(node.value or "") is not None
 
     def assignment_target_contains_const(self, node: ASTNode, scope: Scope) -> bool:

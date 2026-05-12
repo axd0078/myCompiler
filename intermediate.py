@@ -8,6 +8,7 @@ CONSTANT_CODES = {400, 500, 600, 800}
 EOF_CODE = 0
 TYPE_KEYWORDS = {"int", "float", "char", "void"}
 RELATIONAL_OPERATORS = {"<", ">", "<=", ">=", "==", "!="}
+COMPOUND_ASSIGNMENTS = {"+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%"}
 UNSUPPORTED_CPP_KEYWORDS = {
     "class",
     "struct",
@@ -92,6 +93,13 @@ class Lexer:
         "<<": 221,
         ">>": 222,
         "::": 223,
+        "++": 224,
+        "--": 225,
+        "+=": 226,
+        "-=": 227,
+        "*=": 228,
+        "/=": 229,
+        "%=": 230,
     }
 
     def __init__(self, source: str):
@@ -513,8 +521,12 @@ class Parser:
         self.expect("for")
         self.expect("(")
         children: List[ASTNode] = []
-        init = self.parse_expr_opt()
-        self.expect(";")
+        if self.is_type_token(self.current()):
+            init_decls = self.parse_local_var_decl()
+            init = init_decls[0] if init_decls else None
+        else:
+            init = self.parse_expr_opt()
+            self.expect(";")
         cond = self.parse_expr_opt()
         self.expect(";")
         step = self.parse_expr_opt()
@@ -559,9 +571,19 @@ class Parser:
 
     def parse_assignment(self) -> ASTNode:
         left = self.parse_logical_or()
-        if self.match("="):
-            op = self.tokens[self.pos - 1]
+        if self.current().lexeme == "=" or self.current().lexeme in COMPOUND_ASSIGNMENTS:
+            op = self.advance()
             right = self.parse_assignment()
+            if op.lexeme in COMPOUND_ASSIGNMENTS:
+                if left.kind != "Leaf":
+                    self.error("compound assignment target must be identifier")
+                right = ASTNode(
+                    "Operator",
+                    value=COMPOUND_ASSIGNMENTS[op.lexeme],
+                    line=op.line,
+                    children=[left, right],
+                )
+                return ASTNode("Operator", value="=", line=op.line, children=[left, right])
             return ASTNode("Operator", value=op.lexeme, line=op.line, children=[left, right])
         return left
 
@@ -615,6 +637,26 @@ class Parser:
 
     def parse_unary(self) -> ASTNode:
         token = self.current()
+        if token.lexeme in {"++", "--"}:
+            op = self.advance()
+            target = self.parse_unary()
+            if target.kind != "Leaf":
+                self.error("increment target must be identifier")
+            operator = "+" if op.lexeme == "++" else "-"
+            return ASTNode(
+                "Operator",
+                value="=",
+                line=op.line,
+                children=[
+                    target,
+                    ASTNode(
+                        "Operator",
+                        value=operator,
+                        line=op.line,
+                        children=[target, ASTNode("Leaf", value="1", line=op.line)],
+                    ),
+                ],
+            )
         if token.token_code not in CONSTANT_CODES and token.lexeme in {"!", "-", "+"}:
             op = self.advance()
             return ASTNode("Operator", value=op.lexeme, line=op.line, children=[self.parse_unary()])
@@ -628,6 +670,11 @@ class Parser:
             if node.kind != "Leaf":
                 self.error("call target must be identifier")
             node = ASTNode("Call", line=node.line, name=node.value, children=args)
+        if self.current().lexeme in {"++", "--"}:
+            op = self.advance()
+            if node.kind != "Leaf":
+                self.error("increment target must be identifier")
+            node = ASTNode("Postfix", value=op.lexeme, line=op.line, children=[node])
         return node
 
     def parse_argument_list_opt(self) -> List[ASTNode]:

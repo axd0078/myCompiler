@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -28,6 +29,7 @@ def default_output_path(source_path: Path) -> Path:
 
 
 def compile_source(source_text: str) -> str:
+    source_text = normalize_cpp_compat_source(source_text)
     lexer = Lexer(source_text)
     tokens = lexer.tokenize()
     if lexer.errors:
@@ -54,6 +56,35 @@ def compile_source(source_text: str) -> str:
 
 class CompileFailure(Exception):
     pass
+
+
+def normalize_cpp_compat_source(source_text: str) -> str:
+    output_lines: list[str] = []
+    for raw_line in source_text.splitlines():
+        stripped = raw_line.strip()
+        compact = re.sub(r"\s+", "", stripped)
+        if compact in {
+            "ios::sync_with_stdio(false);",
+            "std::ios::sync_with_stdio(false);",
+            "cin.tie(nullptr);",
+            "std::cin.tie(nullptr);",
+            "cout.tie(nullptr);",
+            "std::cout.tie(nullptr);",
+        }:
+            output_lines.append("")
+            continue
+
+        line = raw_line
+        line = line.replace("std::cin", "cin")
+        line = line.replace("std::cout", "cout")
+        line = re.sub(r"<<\s*std::endl\b", lambda _match: r"<< '\n'", line)
+        line = re.sub(r"<<\s*endl\b", lambda _match: r"<< '\n'", line)
+        output_lines.append(line)
+
+    normalized = "\n".join(output_lines)
+    if source_text.endswith("\n"):
+        normalized += "\n"
+    return normalized
 
 
 def compile_file(source_path: Path, output_path: Path) -> None:
