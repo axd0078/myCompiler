@@ -22,6 +22,8 @@ class CspFrontendCorpusTest(unittest.TestCase):
                 self.assertTrue(unit.preprocessed.includes)
                 self.assertTrue(unit.features.includes_bits)
                 self.assertGreater(len(unit.tokens), 0)
+                self.assertIsNotNone(unit.skeleton)
+                self.assertTrue(unit.skeleton.has_main())
 
     def test_detects_representative_csp_features(self):
         unit = load_translation_unit(CSP_ROOT / "41" / "3.cpp")
@@ -30,6 +32,8 @@ class CspFrontendCorpusTest(unittest.TestCase):
         self.assertIn("set", unit.features.containers)
         self.assertTrue(unit.features.has_struct)
         self.assertTrue(unit.features.has_range_for)
+        self.assertGreaterEqual(len(unit.skeleton.structs), 1)
+        self.assertTrue(any(function.name == "main" for function in unit.skeleton.functions))
 
     def test_compile_dir_writes_report(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -186,6 +186,41 @@ class CspTranslationUnit:
     preprocessed: PreprocessResult
     tokens: List[CppToken]
     features: FeatureReport
+    skeleton: Optional["CspSkeleton"] = None
+
+
+@dataclass
+class CspFunction:
+    name: str
+    line: int
+    return_tokens: List[str]
+    parameter_tokens: List[str]
+    has_body: bool
+    body_token_count: int = 0
+
+
+@dataclass
+class CspStruct:
+    name: str
+    line: int
+    token_count: int
+
+
+@dataclass
+class CspGlobalDecl:
+    name: str
+    line: int
+    type_tokens: List[str]
+
+
+@dataclass
+class CspSkeleton:
+    functions: List[CspFunction] = field(default_factory=list)
+    structs: List[CspStruct] = field(default_factory=list)
+    globals: List[CspGlobalDecl] = field(default_factory=list)
+
+    def has_main(self) -> bool:
+        return any(function.name == "main" and function.has_body for function in self.functions)
 
 
 def preprocess_source(source: str) -> PreprocessResult:
@@ -433,4 +468,239 @@ def load_translation_unit(path: Path) -> CspTranslationUnit:
     preprocessed = preprocess_source(text)
     tokens = CppLexer(preprocessed.source).tokenize()
     features = analyze_features(tokens, preprocessed)
-    return CspTranslationUnit(path=path, preprocessed=preprocessed, tokens=tokens, features=features)
+    skeleton = CspSkeletonParser(tokens).parse()
+    return CspTranslationUnit(
+        path=path,
+        preprocessed=preprocessed,
+        tokens=tokens,
+        features=features,
+        skeleton=skeleton,
+    )
+
+
+class CspSkeletonParser:
+    def __init__(self, tokens: Sequence[CppToken]):
+        self.tokens = list(tokens)
+        self.pos = 0
+        self.skeleton = CspSkeleton()
+
+    def parse(self) -> CspSkeleton:
+        while self.pos < len(self.tokens):
+            token = self.tokens[self.pos]
+            if token.lexeme == "typedef" and self.peek_lexeme(1) == "struct":
+                self.parse_struct(is_typedef=True)
+                continue
+            if token.lexeme == "struct":
+                self.parse_struct(is_typedef=False)
+                continue
+            if self.try_parse_function_or_global():
+                continue
+            self.pos += 1
+        return self.skeleton
+
+    def parse_struct(self, is_typedef: bool) -> None:
+        start = self.pos
+        line = self.tokens[self.pos].line
+        if is_typedef:
+            self.pos += 1
+        self.pos += 1
+
+        name = ""
+        if self.current_kind() == "identifier":
+            name = self.tokens[self.pos].lexeme
+            self.pos += 1
+
+        if self.current_lexeme() != "{":
+            self.skip_until_top_level(";")
+            return
+
+        end_brace = self.matching_index(self.pos, "{", "}")
+        if end_brace is None:
+            raise CspFrontendError("Line %d: unclosed struct body" % line)
+
+        self.pos = end_brace + 1
+        if is_typedef and self.current_kind() == "identifier":
+            name = self.tokens[self.pos].lexeme
+            self.pos += 1
+
+        self.skip_optional_declarators_to_semicolon()
+        self.skeleton.structs.append(
+            CspStruct(name=name or "<anonymous>", line=line, token_count=self.pos - start)
+        )
+
+    def try_parse_function_or_global(self) -> bool:
+        start = self.pos
+        statement_end = self.find_top_level_statement_end(start)
+        if statement_end is None:
+            return False
+
+        lparen = self.find_top_level_token("(", start, statement_end)
+        if lparen is not None:
+            rparen = self.matching_index(lparen, "(", ")")
+            if rparen is not None:
+                body_start = self.skip_cv_after_parameters(rparen + 1)
+                if body_start < len(self.tokens) and self.tokens[body_start].lexeme in {"{", ";"}:
+                    function = self.build_function(start, lparen, rparen, body_start)
+                    if function is not None:
+                        self.skeleton.functions.append(function)
+                        if self.tokens[body_start].lexeme == "{":
+                            body_end = self.matching_index(body_start, "{", "}")
+                            if body_end is None:
+                                raise CspFrontendError(
+                                    "Line %d: unclosed function body" % self.tokens[body_start].line
+                                )
+                            self.pos = body_end + 1
+                        else:
+                            self.pos = body_start + 1
+                        return True
+
+        if self.tokens[statement_end].lexeme == ";":
+            self.collect_global_decls(start, statement_end)
+            self.pos = statement_end + 1
+            return True
+
+        return False
+
+    def build_function(
+        self,
+        start: int,
+        lparen: int,
+        rparen: int,
+        body_start: int,
+    ) -> Optional[CspFunction]:
+        name_index = lparen - 1
+        if name_index < start:
+            return None
+
+        name = self.tokens[name_index].lexeme
+        if name == ")":
+            return None
+        if name == "operator":
+            name = "operator"
+        if name in CPP_KEYWORDS and name != "operator":
+            return None
+
+        return_tokens = [token.lexeme for token in self.tokens[start:name_index]]
+        parameter_tokens = [token.lexeme for token in self.tokens[lparen + 1 : rparen]]
+        has_body = self.tokens[body_start].lexeme == "{"
+        body_token_count = 0
+        if has_body:
+            body_end = self.matching_index(body_start, "{", "}")
+            body_token_count = 0 if body_end is None else body_end - body_start - 1
+        return CspFunction(
+            name=name,
+            line=self.tokens[name_index].line,
+            return_tokens=return_tokens,
+            parameter_tokens=parameter_tokens,
+            has_body=has_body,
+            body_token_count=body_token_count,
+        )
+
+    def collect_global_decls(self, start: int, end: int) -> None:
+        segment = self.tokens[start:end]
+        if not segment:
+            return
+        if any(token.lexeme in {"=", "(", ")"} for token in segment):
+            return
+        for index, token in enumerate(segment):
+            if token.kind == "identifier":
+                previous = segment[index - 1].lexeme if index > 0 else ""
+                next_lexeme = segment[index + 1].lexeme if index + 1 < len(segment) else ""
+                if previous in {",", "*", "&"} or next_lexeme in {",", "[", ""}:
+                    self.skeleton.globals.append(
+                        CspGlobalDecl(
+                            name=token.lexeme,
+                            line=token.line,
+                            type_tokens=[item.lexeme for item in segment[:index]],
+                        )
+                    )
+
+    def find_top_level_statement_end(self, start: int) -> Optional[int]:
+        depth = {"(": 0, "[": 0, "{": 0, "<": 0}
+        index = start
+        while index < len(self.tokens):
+            lexeme = self.tokens[index].lexeme
+            if all(value == 0 for value in depth.values()) and lexeme in {";", "{"}:
+                return index
+
+            if lexeme in {"(", "[", "{"}:
+                depth[lexeme] += 1
+            elif lexeme == ")" and depth["("] > 0:
+                depth["("] -= 1
+            elif lexeme == "]" and depth["["] > 0:
+                depth["["] -= 1
+            elif lexeme == "}" and depth["{"] > 0:
+                depth["{"] -= 1
+            elif lexeme == "<" and self.looks_like_template_angle(index):
+                depth["<"] += 1
+            elif lexeme == ">" and depth["<"] > 0:
+                depth["<"] -= 1
+
+            index += 1
+        return None
+
+    def find_top_level_token(self, target: str, start: int, end: int) -> Optional[int]:
+        angle_depth = 0
+        for index in range(start, end + 1):
+            lexeme = self.tokens[index].lexeme
+            if lexeme == "<" and self.looks_like_template_angle(index):
+                angle_depth += 1
+                continue
+            if lexeme == ">" and angle_depth > 0:
+                angle_depth -= 1
+                continue
+            if angle_depth == 0 and lexeme == target:
+                return index
+        return None
+
+    def matching_index(self, start: int, open_lexeme: str, close_lexeme: str) -> Optional[int]:
+        depth = 0
+        for index in range(start, len(self.tokens)):
+            lexeme = self.tokens[index].lexeme
+            if lexeme == open_lexeme:
+                depth += 1
+            elif lexeme == close_lexeme:
+                depth -= 1
+                if depth == 0:
+                    return index
+        return None
+
+    def skip_cv_after_parameters(self, index: int) -> int:
+        while index < len(self.tokens) and self.tokens[index].lexeme in {"const", "noexcept"}:
+            index += 1
+        return index
+
+    def skip_optional_declarators_to_semicolon(self) -> None:
+        while self.pos < len(self.tokens) and self.tokens[self.pos].lexeme != ";":
+            self.pos += 1
+        if self.pos < len(self.tokens):
+            self.pos += 1
+
+    def skip_until_top_level(self, lexeme: str) -> None:
+        while self.pos < len(self.tokens) and self.tokens[self.pos].lexeme != lexeme:
+            self.pos += 1
+        if self.pos < len(self.tokens):
+            self.pos += 1
+
+    def looks_like_template_angle(self, index: int) -> bool:
+        if index == 0 or index + 1 >= len(self.tokens):
+            return False
+        previous = self.tokens[index - 1]
+        next_token = self.tokens[index + 1]
+        return previous.kind in {"identifier", "keyword"} and next_token.lexeme not in {"=", ";"}
+
+    def current_lexeme(self) -> str:
+        if self.pos >= len(self.tokens):
+            return ""
+        return self.tokens[self.pos].lexeme
+
+    def current_kind(self) -> str:
+        if self.pos >= len(self.tokens):
+            return ""
+        return self.tokens[self.pos].kind
+
+    def peek_lexeme(self, distance: int) -> str:
+        index = self.pos + distance
+        if index >= len(self.tokens):
+            return ""
+        return self.tokens[index].lexeme
