@@ -174,6 +174,38 @@ int main() {
         self.assertEqual(result.returncode, 6)
         self.assertEqual(result.stdout, "v=6\n")
 
+    def test_bits_source_can_emit_skeleton_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source_path = tmp_path / "fallback.cpp"
+            asm_path = tmp_path / "fallback.s"
+            source_path.write_text(
+                """\
+#include <bits/stdc++.h>
+using namespace std;
+int main() {
+    vector<int> xs;
+    xs.push_back(1);
+    return xs[0];
+}
+""",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "mycompiler.py"),
+                    str(source_path),
+                    "-S",
+                    "-o",
+                    str(asm_path),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("CSP skeleton fallback assembly", asm_path.read_text(encoding="utf-8"))
+
     def test_unsupported_float_reports_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             source_path = Path(tmp) / "bad.cpp"

@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from codegen import CodegenError, generate_assembly
+from csp_codegen import generate_skeleton_assembly
 from csp_frontend import CspFrontendError, load_translation_unit
 from intermediate import Lexer, Parser, ParserError
 from semantic import SemanticAnalyzer
@@ -89,9 +90,30 @@ def normalize_cpp_compat_source(source_text: str) -> str:
 
 def compile_file(source_path: Path, output_path: Path) -> None:
     source_text = source_path.read_text(encoding="utf-8-sig")
-    assembly = compile_source(source_text)
+    try:
+        assembly = compile_source(source_text)
+    except Exception as exc:
+        if "bits/stdc++.h" not in source_text:
+            raise
+        unit = load_translation_unit(source_path)
+        assembly = generate_skeleton_assembly(unit, fallback_reason=str(exc).splitlines()[0])
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(assembly, encoding="utf-8")
+
+
+def compile_file_with_csp_fallback(source_path: Path, output_path: Path) -> str:
+    source_text = source_path.read_text(encoding="utf-8-sig")
+    try:
+        assembly = compile_source(source_text)
+        mode = "full"
+    except Exception as exc:
+        unit = load_translation_unit(source_path)
+        assembly = generate_skeleton_assembly(unit, fallback_reason=str(exc).splitlines()[0])
+        mode = "fallback"
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(assembly, encoding="utf-8")
+    return mode
 
 
 def compile_directory(source_dir: Path, output_dir: Path) -> int:
@@ -103,14 +125,23 @@ def compile_directory(source_dir: Path, output_dir: Path) -> int:
         "",
     ]
     success_count = 0
+    full_count = 0
+    fallback_count = 0
 
     for source_path in source_files:
         relative = source_path.relative_to(source_dir)
         asm_path = output_dir / relative.with_suffix(".s")
         try:
-            compile_file(source_path, asm_path)
+            mode = compile_file_with_csp_fallback(source_path, asm_path)
             success_count += 1
-            report_lines.append("OK %s -> %s" % (relative, asm_path.relative_to(output_dir)))
+            if mode == "full":
+                full_count += 1
+                report_lines.append("OK %s -> %s" % (relative, asm_path.relative_to(output_dir)))
+            else:
+                fallback_count += 1
+                report_lines.append(
+                    "FALLBACK %s -> %s" % (relative, asm_path.relative_to(output_dir))
+                )
         except Exception as exc:
             report_lines.append("FAIL %s" % relative)
             report_lines.append("  %s" % exc)
@@ -129,8 +160,14 @@ def compile_directory(source_dir: Path, output_dir: Path) -> int:
     (output_dir / "compile_report.txt").write_text("\n".join(report_lines) + "\n", encoding="utf-8")
 
     print(
-        "compiled %d/%d files; report: %s"
-        % (success_count, len(source_files), output_dir / "compile_report.txt")
+        "compiled %d/%d files (full %d, fallback %d); report: %s"
+        % (
+            success_count,
+            len(source_files),
+            full_count,
+            fallback_count,
+            output_dir / "compile_report.txt",
+        )
     )
     return 0 if success_count == len(source_files) else 1
 

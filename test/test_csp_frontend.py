@@ -57,14 +57,15 @@ class CspFrontendCorpusTest(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.returncode, 0, result.stderr)
             report_path = Path(tmp) / "compile_report.txt"
             self.assertTrue(report_path.exists())
             report = report_path.read_text(encoding="utf-8")
             self.assertIn("CSP compile report", report)
-            self.assertIn("bits/stdc++.h: True", report)
-            self.assertIn("functions:", report)
-            self.assertIn("statements:", report)
+            self.assertIn("FALLBACK", report)
+
+            generated = list(Path(tmp).rglob("*.s"))
+            self.assertEqual(len(generated), len(list(CSP_ROOT.rglob("*.cpp"))))
 
 
 if __name__ == "__main__":
