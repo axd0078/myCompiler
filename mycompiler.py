@@ -78,6 +78,10 @@ def normalize_cpp_compat_source(source_text: str) -> str:
         line = raw_line
         line = line.replace("std::cin", "cin")
         line = line.replace("std::cout", "cout")
+        line = re.sub(r"<<\s*std::fixed\b", "", line)
+        line = re.sub(r"<<\s*fixed\b", "", line)
+        line = re.sub(r"<<\s*std::setprecision\s*\([^)]*\)", "", line)
+        line = re.sub(r"<<\s*setprecision\s*\([^)]*\)", "", line)
         line = re.sub(r"<<\s*std::endl\b", lambda _match: r"<< '\n'", line)
         line = re.sub(r"<<\s*endl\b", lambda _match: r"<< '\n'", line)
         output_lines.append(line)

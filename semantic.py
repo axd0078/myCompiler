@@ -416,7 +416,15 @@ class SemanticAnalyzer:
             if not result.is_lvalue or result.symbol.kind == "const":
                 self.record_error(child.line or node.line, ERROR_ASSIGN_TO_CONST)
                 continue
-            if result.type_name not in {"int", "char"}:
+            if result.type_name not in {
+                "int",
+                "char",
+                "long long",
+                "unsigned long long",
+                "bool",
+                "float",
+                "double",
+            }:
                 self.record_error(child.line or node.line, ERROR_OPERAND_TYPE)
 
     def handle_output(self, node: ASTNode, scope: Scope) -> None:
@@ -424,7 +432,16 @@ class SemanticAnalyzer:
             result = self.analyze_expression(child, scope)
             if result.type_name is None:
                 continue
-            if result.type_name not in {"int", "char", "string"}:
+            if result.type_name not in {
+                "int",
+                "char",
+                "long long",
+                "unsigned long long",
+                "bool",
+                "float",
+                "double",
+                "string",
+            }:
                 self.record_error(child.line or node.line, ERROR_OPERAND_TYPE)
 
     def handle_loop_body(
@@ -461,6 +478,8 @@ class SemanticAnalyzer:
 
         result = self.analyze_expression(expr, scope)
         if result.type_name is None or result.type_name == context.return_type:
+            context.valid_return = True
+        elif self.type_category(result.type_name) == "integer" and self.type_category(context.return_type) == "integer":
             context.valid_return = True
         else:
             context.invalid_return = True
@@ -558,6 +577,21 @@ class SemanticAnalyzer:
                 self.record_error(node.line, ERROR_ASSIGN_TO_CONST)
             return ExprResult(type_name=result.type_name)
 
+        if node.kind == "Cast":
+            if node.children:
+                self.analyze_expression(node.children[0], scope)
+            return ExprResult(type_name=node.type_name)
+
+        if node.kind == "Conditional":
+            if len(node.children) != 3:
+                return ExprResult()
+            self.analyze_expression(node.children[0], scope)
+            left = self.analyze_expression(node.children[1], scope)
+            right = self.analyze_expression(node.children[2], scope)
+            if self.arithmetic_types_incompatible(left.type_name, right.type_name):
+                self.record_error(node.line, ERROR_OPERAND_TYPE)
+            return ExprResult(type_name=self.promote_arithmetic_type(left.type_name, right.type_name))
+
         if node.kind != "Operator":
             return ExprResult()
 
@@ -583,9 +617,9 @@ class SemanticAnalyzer:
         right = self.analyze_expression(node.children[1], scope)
 
         if self.is_arithmetic_operator_value(node.value):
-            if self.types_mismatch(left.type_name, right.type_name):
+            if self.arithmetic_types_incompatible(left.type_name, right.type_name):
                 self.record_error(node.line, ERROR_OPERAND_TYPE)
-            return ExprResult(type_name=left.type_name or right.type_name)
+            return ExprResult(type_name=self.promote_arithmetic_type(left.type_name, right.type_name))
 
         if node.value in {"<", ">", "<=", ">=", "==", "!=", "&&", "||"}:
             return ExprResult(type_name="int")
@@ -610,9 +644,38 @@ class SemanticAnalyzer:
         right_category = self.type_category(right_type)
         return left_category is not None and right_category is not None and left_category != right_category
 
+    def arithmetic_types_incompatible(
+        self,
+        left_type: Optional[str],
+        right_type: Optional[str],
+    ) -> bool:
+        left_category = self.type_category(left_type)
+        right_category = self.type_category(right_type)
+        allowed = {"integer", "real"}
+        return (
+            left_category is not None
+            and right_category is not None
+            and (left_category not in allowed or right_category not in allowed)
+        )
+
+    def promote_arithmetic_type(
+        self,
+        left_type: Optional[str],
+        right_type: Optional[str],
+    ) -> Optional[str]:
+        if self.type_category(left_type) == "real" or self.type_category(right_type) == "real":
+            return "double"
+        if left_type in {"long long", "unsigned long long"}:
+            return left_type
+        if right_type in {"long long", "unsigned long long"}:
+            return right_type
+        return left_type or right_type
+
     def type_category(self, type_name: Optional[str]) -> Optional[str]:
         if type_name is None:
             return None
+        if type_name in {"int", "long long", "unsigned long long", "bool", "char"}:
+            return "integer"
         if type_name in {"float", "double"}:
             return "real"
         return type_name
@@ -702,6 +765,8 @@ class SemanticAnalyzer:
             return "char"
         if FLOAT_LITERAL_RE.fullmatch(text):
             return "float"
+        if re.fullmatch(r"[+-]?(?:0|[1-9]\d*|0[xX][0-9A-Fa-f]+|0[0-7]+)(?:[uU]?[lL]{1,2}|[lL]{1,2}[uU]?)?", text):
+            return "long long" if any(ch in text.lower() for ch in "lu") else "int"
         if INT_LITERAL_RE.fullmatch(text):
             return "int"
         if text in {"\\n", "\\t", "\\r", "\\0", "\\\\", "\\'"}:
@@ -747,6 +812,14 @@ class SemanticAnalyzer:
             left = self.expr_to_text(node.children[0])
             right = self.expr_to_text(node.children[1])
             return f"({left}{node.value}{right})"
+        if node.kind == "Cast":
+            return f"({node.type_name}){self.expr_to_text(node.children[0]) if node.children else ''}"
+        if node.kind == "Conditional" and len(node.children) == 3:
+            return (
+                f"({self.expr_to_text(node.children[0])}?"
+                f"{self.expr_to_text(node.children[1])}:"
+                f"{self.expr_to_text(node.children[2])})"
+            )
         return node.kind
 
     def format_const_table(self) -> str:

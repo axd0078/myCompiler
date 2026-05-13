@@ -174,6 +174,46 @@ int main() {
         self.assertEqual(result.returncode, 6)
         self.assertEqual(result.stdout, "v=6\n")
 
+    def test_long_long_ternary_and_literal_suffix(self):
+        result = self.compile_and_run(
+            """\
+#include <bits/stdc++.h>
+using namespace std;
+int main() {
+    long long b = 2;
+    long long c = 3;
+    long long l = 1;
+    long long r = 4;
+    long long sum = 0;
+    int start = (l % 2 == 0 ? l : l + 1);
+    for (int x = start; x <= r; x += 2) {
+        sum += 1LL * x * x + 1LL * b * x + c;
+    }
+    cout << sum << endl;
+    return (int)sum;
+}
+"""
+        )
+        self.assertEqual(result.returncode, 38)
+        self.assertEqual(result.stdout, "38\n")
+
+    def test_double_arithmetic_and_output_manipulators(self):
+        result = self.compile_and_run(
+            """\
+#include <bits/stdc++.h>
+using namespace std;
+int main() {
+    int n = 4;
+    double m = 3.0;
+    double pi = 1.0 * 4 * m / n;
+    cout << fixed << setprecision(6) << pi << endl;
+    return (int)pi;
+}
+"""
+        )
+        self.assertEqual(result.returncode, 3)
+        self.assertTrue(result.stdout.startswith("3."))
+
     def test_bits_source_can_emit_skeleton_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -206,10 +246,10 @@ int main() {
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("CSP skeleton fallback assembly", asm_path.read_text(encoding="utf-8"))
 
-    def test_unsupported_float_reports_error(self):
+    def test_float_declaration_is_supported(self):
         with tempfile.TemporaryDirectory() as tmp:
-            source_path = Path(tmp) / "bad.cpp"
-            asm_path = Path(tmp) / "bad.s"
+            source_path = Path(tmp) / "float.cpp"
+            asm_path = Path(tmp) / "float.s"
             source_path.write_text(
                 """\
 int main() {
@@ -231,9 +271,8 @@ int main() {
                 capture_output=True,
                 text=True,
             )
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("float", result.stderr)
-            self.assertFalse(asm_path.exists())
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(asm_path.exists())
 
 
 if __name__ == "__main__":

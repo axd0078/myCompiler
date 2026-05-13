@@ -247,7 +247,7 @@ Program
 
 class SemanticAnalyzerTest(unittest.TestCase):
     def test_sample_errors(self):
-        self.assertEqual(generate_output(SAMPLE_AST), "7 301\n8 302\n9 310\n")
+        self.assertEqual(generate_output(SAMPLE_AST), "7 301\n8 302\n")
 
     def test_function_call_checks(self):
         self.assertEqual(generate_output(CALL_AST), "4 305\n5 306\n")
@@ -292,7 +292,7 @@ class SemanticAnalyzerTest(unittest.TestCase):
 
     def test_input_output_statements_are_checked(self):
         self.assertEqual(generate_output(IO_AST), "")
-        self.assertEqual(generate_output(IO_ERROR_AST), "3 309\n5 310\n")
+        self.assertEqual(generate_output(IO_ERROR_AST), "3 309\n")
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@
 ## Phase 1 当前状态
 - [x] `--compile-dir` 已能对 CSP corpus 产出 62/62 个 `.s`。
 - [x] 单文件 CSP 输入在旧后端不支持时会生成带标记的 skeleton fallback `.s`。
-- [ ] 29 个 fallback 文件仍需迁移到真实语义 lowering 和运行时。
+- [ ] 26 个 fallback 文件仍需迁移到真实语义 lowering 和运行时。
 - [ ] Phase 1 完整语义目标仍是消除 fallback，达到 62/62 full codegen。
 
 ## Phase 1：CSP 62/62 生成汇编

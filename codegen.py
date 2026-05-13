@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import re
+import struct
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence
 
 
-SUPPORTED_VALUE_TYPES = {"int", "char"}
-SUPPORTED_RETURN_TYPES = {"int", "char", "void"}
+REAL_TYPES = {"float", "double"}
+SUPPORTED_VALUE_TYPES = {"int", "char", "long long", "unsigned long long", "bool", "float", "double"}
+SUPPORTED_RETURN_TYPES = {"int", "char", "long long", "unsigned long long", "bool", "float", "double", "void"}
 BUILTIN_FUNCTIONS = {"abs", "llabs", "min", "max"}
 RELATIONAL_JUMPS = {
     "==": "sete",
@@ -19,7 +21,10 @@ RELATIONAL_JUMPS = {
 ARG_REGS_64 = ["rcx", "rdx", "r8", "r9"]
 ARG_REGS_32 = ["ecx", "edx", "r8d", "r9d"]
 ARG_REGS_8 = ["cl", "dl", "r8b", "r9b"]
-INT_LITERAL_RE = re.compile(r"[+-]?(?:0|[1-9]\d*|0[xX][0-9A-Fa-f]+|0[0-7]+)")
+INT_LITERAL_RE = re.compile(
+    r"[+-]?(?:0|[1-9]\d*|0[xX][0-9A-Fa-f]+|0[0-7]+)(?:[uU]?[lL]{1,2}|[lL]{1,2}[uU]?)?"
+)
+FLOAT_LITERAL_RE = re.compile(r"[+-]?(?:(?:\d+\.\d*|\d*\.\d+)(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)")
 
 
 class CodegenError(Exception):
@@ -86,6 +91,7 @@ class AssemblyGenerator:
         self.global_order: List[VariableInfo] = []
         self.global_nodes: Dict[str, object] = {}
         self.string_literals: Dict[str, str] = {}
+        self.real_literals: Dict[str, str] = {}
         self.lines: List[str] = []
         self.current: Optional[FunctionFrame] = None
 
@@ -95,6 +101,7 @@ class AssemblyGenerator:
 
         self.collect_toplevel(root.children)
         self.collect_string_literals(root)
+        self.collect_real_literals(root)
         self.lines = []
         self.emit_header()
         self.emit_globals()
@@ -149,10 +156,18 @@ class AssemblyGenerator:
                 ".section .rdata",
                 ".Lfmt_read_int:",
                 '    .asciz "%d"',
+                ".Lfmt_read_i64:",
+                '    .asciz "%lld"',
+                ".Lfmt_read_double:",
+                '    .asciz "%lf"',
                 ".Lfmt_read_char:",
                 '    .asciz " %c"',
                 ".Lfmt_write_int:",
                 '    .asciz "%d"',
+                ".Lfmt_write_i64:",
+                '    .asciz "%lld"',
+                ".Lfmt_write_double:",
+                '    .asciz "%f"',
                 ".Lfmt_write_char:",
                 '    .asciz "%c"',
                 ".Lfmt_write_string:",
@@ -162,6 +177,9 @@ class AssemblyGenerator:
         for literal, label in self.string_literals.items():
             self.lines.append("%s:" % label)
             self.lines.append("    .asciz %s" % literal)
+        for literal, label in self.real_literals.items():
+            self.lines.append("%s:" % label)
+            self.lines.append("    .quad 0x%016x" % self.double_bits(literal))
         self.lines.append("")
 
     def collect_string_literals(self, node) -> None:
@@ -170,6 +188,13 @@ class AssemblyGenerator:
                 self.string_literals[node.value or ""] = ".Lstr_%d" % len(self.string_literals)
         for child in node.children:
             self.collect_string_literals(child)
+
+    def collect_real_literals(self, node) -> None:
+        if node.kind == "Leaf" and self.is_float_literal(node.value or ""):
+            if node.value not in self.real_literals:
+                self.real_literals[node.value or ""] = ".Lreal_%d" % len(self.real_literals)
+        for child in node.children:
+            self.collect_real_literals(child)
 
     def emit_globals(self) -> None:
         if not self.global_order:
@@ -283,6 +308,8 @@ class AssemblyGenerator:
             if index < 4:
                 if variable.type_name == "char":
                     self.lines.append("    mov %s, %s" % (self.byte_mem(variable), ARG_REGS_8[index]))
+                elif self.is_i64_type(variable.type_name):
+                    self.lines.append("    mov %s, %s" % (self.qword_mem(variable), ARG_REGS_64[index]))
                 else:
                     self.lines.append("    mov %s, %s" % (self.dword_mem(variable), ARG_REGS_32[index]))
                 continue
@@ -291,6 +318,9 @@ class AssemblyGenerator:
             if variable.type_name == "char":
                 self.lines.append("    mov al, BYTE PTR [rbp+%d]" % stack_offset)
                 self.lines.append("    mov %s, al" % self.byte_mem(variable))
+            elif self.is_i64_type(variable.type_name):
+                self.lines.append("    mov rax, QWORD PTR [rbp+%d]" % stack_offset)
+                self.lines.append("    mov %s, rax" % self.qword_mem(variable))
             else:
                 self.lines.append("    mov eax, DWORD PTR [rbp+%d]" % stack_offset)
                 self.lines.append("    mov %s, eax" % self.dword_mem(variable))
@@ -312,8 +342,12 @@ class AssemblyGenerator:
         variable = frame.variables_by_node[id(node)]
         frame.scopes[-1][variable.name] = variable
         if node.children:
-            self.emit_expression(node.children[0])
-            self.store_eax(variable)
+            if self.is_real_type(variable.type_name):
+                self.emit_real_expression(node.children[0])
+                self.store_xmm0(variable)
+            else:
+                self.emit_expression(node.children[0])
+                self.store_eax(variable)
 
     def emit_statement(self, node) -> None:
         if node.kind == "Compound":
@@ -370,9 +404,9 @@ class AssemblyGenerator:
             if variable.is_const:
                 raise CodegenError("cin target must be assignable", child.line)
             if variable.type_name not in SUPPORTED_VALUE_TYPES:
-                raise CodegenError("cin supports only int and char", child.line)
+                raise CodegenError("cin supports only integer scalar targets", child.line)
             self.load_address("rdx", variable)
-            fmt = ".Lfmt_read_char" if variable.type_name == "char" else ".Lfmt_read_int"
+            fmt = self.input_format(variable.type_name)
             self.lines.append("    lea rcx, %s[rip]" % fmt)
             self.lines.append("    xor eax, eax")
             self.lines.append("    call scanf")
@@ -394,9 +428,20 @@ class AssemblyGenerator:
                 self.lines.append("    xor eax, eax")
                 self.lines.append("    call printf")
                 continue
+            if self.is_real_type(type_name):
+                self.emit_real_expression(child)
+                self.lines.append("    movq rdx, xmm0")
+                self.lines.append("    movq xmm1, rdx")
+                self.lines.append("    lea rcx, .Lfmt_write_double[rip]")
+                self.lines.append("    xor eax, eax")
+                self.lines.append("    call printf")
+                continue
             self.emit_expression(child)
-            self.lines.append("    mov edx, eax")
-            fmt = ".Lfmt_write_char" if type_name == "char" else ".Lfmt_write_int"
+            if self.is_i64_type(type_name):
+                self.lines.append("    mov rdx, rax")
+            else:
+                self.lines.append("    mov edx, eax")
+            fmt = self.output_format(type_name or "int")
             self.lines.append("    lea rcx, %s[rip]" % fmt)
             self.lines.append("    xor eax, eax")
             self.lines.append("    call printf")
@@ -483,24 +528,149 @@ class AssemblyGenerator:
         if node.kind == "Postfix":
             self.emit_postfix(node)
             return
+        if node.kind == "Cast":
+            self.emit_cast(node)
+            return
+        if node.kind == "Conditional":
+            self.emit_conditional(node)
+            return
         if node.kind != "Operator":
             raise CodegenError("unsupported expression '%s'" % node.kind, node.line)
 
         if len(node.children) == 1:
             self.emit_unary(node)
             return
+        if node.value in RELATIONAL_JUMPS and (
+            self.is_real_type(self.expression_type(node.children[0]))
+            or self.is_real_type(self.expression_type(node.children[1]))
+        ):
+            self.emit_real_compare(node)
+            return
         if node.value == "=":
             target = node.children[0]
             if target.kind != "Leaf":
                 raise CodegenError("assignment target must be a variable", node.line)
             variable = self.lookup_variable(target.value or "", target.line)
-            self.emit_expression(node.children[1])
-            self.store_eax(variable)
+            if self.is_real_type(variable.type_name):
+                self.emit_real_expression(node.children[1])
+                self.store_xmm0(variable)
+            else:
+                self.emit_expression(node.children[1])
+                self.store_eax(variable)
             return
         if node.value in {"&&", "||"}:
             self.emit_logical(node)
             return
         self.emit_binary(node)
+
+    def emit_cast(self, node) -> None:
+        if not node.children:
+            self.lines.append("    xor eax, eax")
+            return
+        target_type = node.type_name or ""
+        source_type = self.expression_type(node.children[0])
+        if self.is_real_type(target_type):
+            self.emit_real_expression(node.children[0])
+            return
+        if self.is_real_type(source_type):
+            self.emit_real_expression(node.children[0])
+            self.lines.append("    cvttsd2si rax, xmm0")
+            return
+        self.emit_expression(node.children[0])
+
+    def emit_conditional(self, node) -> None:
+        if len(node.children) != 3:
+            self.lines.append("    xor eax, eax")
+            return
+        else_label = self.new_label("ternary_else")
+        end_label = self.new_label("ternary_end")
+        self.emit_expression(node.children[0])
+        self.lines.append("    cmp rax, 0")
+        self.lines.append("    je %s" % else_label)
+        self.emit_expression(node.children[1])
+        self.lines.append("    jmp %s" % end_label)
+        self.lines.append("%s:" % else_label)
+        self.emit_expression(node.children[2])
+        self.lines.append("%s:" % end_label)
+
+    def emit_real_expression(self, node) -> None:
+        if node.kind == "Cast":
+            if not node.children:
+                self.lines.append("    pxor xmm0, xmm0")
+                return
+            if self.is_real_type(node.type_name):
+                self.emit_real_expression(node.children[0])
+                return
+            self.emit_expression(node)
+            self.lines.append("    cvtsi2sd xmm0, rax")
+            return
+        if node.kind == "Leaf":
+            text = node.value or ""
+            if self.is_float_literal(text):
+                label = self.real_literals.get(text)
+                if label is None:
+                    label = ".Lreal_%d" % len(self.real_literals)
+                    self.real_literals[text] = label
+                self.lines.append("    movsd xmm0, QWORD PTR %s[rip]" % label)
+                return
+            if self.is_int_literal(text) or self.is_char_literal(text):
+                self.emit_expression(node)
+                self.lines.append("    cvtsi2sd xmm0, rax")
+                return
+            variable = self.lookup_variable(text, node.line)
+            if self.is_real_type(variable.type_name):
+                self.lines.append("    movsd xmm0, %s" % self.qword_mem(variable))
+                return
+            self.load_variable(variable)
+            self.lines.append("    cvtsi2sd xmm0, rax")
+            return
+        if node.kind == "Operator" and len(node.children) == 2 and node.value in {"+", "-", "*", "/"}:
+            self.emit_real_expression(node.children[0])
+            slot = self.reserve_temp()
+            self.lines.append("    movsd QWORD PTR %s, xmm0" % self.temp_mem(slot))
+            self.emit_real_expression(node.children[1])
+            self.lines.append("    movsd xmm1, QWORD PTR %s" % self.temp_mem(slot))
+            self.release_temp()
+            if node.value == "+":
+                self.lines.append("    addsd xmm1, xmm0")
+            elif node.value == "-":
+                self.lines.append("    subsd xmm1, xmm0")
+            elif node.value == "*":
+                self.lines.append("    mulsd xmm1, xmm0")
+            elif node.value == "/":
+                self.lines.append("    divsd xmm1, xmm0")
+            self.lines.append("    movapd xmm0, xmm1")
+            return
+        if node.kind == "Operator" and len(node.children) == 1:
+            self.emit_real_expression(node.children[0])
+            if node.value == "-":
+                self.lines.append("    xorpd xmm1, xmm1")
+                self.lines.append("    subsd xmm1, xmm0")
+                self.lines.append("    movapd xmm0, xmm1")
+            return
+        self.emit_expression(node)
+        self.lines.append("    cvtsi2sd xmm0, rax")
+
+    def emit_real_compare(self, node) -> None:
+        self.emit_real_expression(node.children[0])
+        slot = self.reserve_temp()
+        self.lines.append("    movsd QWORD PTR %s, xmm0" % self.temp_mem(slot))
+        self.emit_real_expression(node.children[1])
+        self.lines.append("    movsd xmm1, QWORD PTR %s" % self.temp_mem(slot))
+        self.release_temp()
+        self.lines.append("    ucomisd xmm1, xmm0")
+        jump = {
+            "==": "sete",
+            "!=": "setne",
+            "<": "setb",
+            "<=": "setbe",
+            ">": "seta",
+            ">=": "setae",
+        }.get(node.value)
+        if jump is None:
+            raise CodegenError("unsupported real comparison '%s'" % node.value, node.line)
+        self.lines.append("    %s al" % jump)
+        self.lines.append("    movzx eax, al")
 
     def emit_leaf(self, node) -> None:
         text = node.value or ""
@@ -510,7 +680,11 @@ class AssemblyGenerator:
             self.lines.append("    mov eax, %d" % self.char_value(text))
             return
         if self.is_int_literal(text):
-            self.lines.append("    mov eax, %d" % self.int_value(text))
+            self.lines.append("    mov rax, %d" % self.int_value(text))
+            return
+        if self.is_float_literal(text):
+            self.emit_real_expression(node)
+            self.lines.append("    cvttsd2si rax, xmm0")
             return
         variable = self.lookup_variable(text, node.line)
         self.load_variable(variable)
@@ -535,25 +709,25 @@ class AssemblyGenerator:
         self.lines.append("    cdqe")
         self.lines.append("    mov QWORD PTR %s, rax" % self.temp_mem(slot))
         self.emit_expression(node.children[1])
-        self.lines.append("    mov r10d, eax")
-        self.lines.append("    mov eax, DWORD PTR %s" % self.temp_mem(slot))
+        self.lines.append("    mov r10, rax")
+        self.lines.append("    mov rax, QWORD PTR %s" % self.temp_mem(slot))
         self.release_temp()
 
         if node.value == "+":
-            self.lines.append("    add eax, r10d")
+            self.lines.append("    add rax, r10")
         elif node.value == "-":
-            self.lines.append("    sub eax, r10d")
+            self.lines.append("    sub rax, r10")
         elif node.value == "*":
-            self.lines.append("    imul eax, r10d")
+            self.lines.append("    imul rax, r10")
         elif node.value == "/":
-            self.lines.append("    cdq")
-            self.lines.append("    idiv r10d")
+            self.lines.append("    cqo")
+            self.lines.append("    idiv r10")
         elif node.value == "%":
-            self.lines.append("    cdq")
-            self.lines.append("    idiv r10d")
-            self.lines.append("    mov eax, edx")
+            self.lines.append("    cqo")
+            self.lines.append("    idiv r10")
+            self.lines.append("    mov rax, rdx")
         elif node.value in RELATIONAL_JUMPS:
-            self.lines.append("    cmp eax, r10d")
+            self.lines.append("    cmp rax, r10")
             self.lines.append("    %s al" % RELATIONAL_JUMPS[node.value])
             self.lines.append("    movzx eax, al")
         else:
@@ -565,10 +739,10 @@ class AssemblyGenerator:
         end_label = self.new_label("logic_end")
         if node.value == "&&":
             self.emit_expression(node.children[0])
-            self.lines.append("    cmp eax, 0")
+            self.lines.append("    cmp rax, 0")
             self.lines.append("    je %s" % false_label)
             self.emit_expression(node.children[1])
-            self.lines.append("    cmp eax, 0")
+            self.lines.append("    cmp rax, 0")
             self.lines.append("    je %s" % false_label)
             self.lines.append("%s:" % true_label)
             self.lines.append("    mov eax, 1")
@@ -579,10 +753,10 @@ class AssemblyGenerator:
             return
 
         self.emit_expression(node.children[0])
-        self.lines.append("    cmp eax, 0")
+        self.lines.append("    cmp rax, 0")
         self.lines.append("    jne %s" % true_label)
         self.emit_expression(node.children[1])
-        self.lines.append("    cmp eax, 0")
+        self.lines.append("    cmp rax, 0")
         self.lines.append("    jne %s" % true_label)
         self.lines.append("%s:" % false_label)
         self.lines.append("    xor eax, eax")
@@ -632,7 +806,7 @@ class AssemblyGenerator:
                 raise CodegenError("builtin '%s' expects one argument" % name, node.line)
             done_label = self.new_label("abs_done")
             self.emit_expression(node.children[0])
-            self.lines.append("    cmp eax, 0")
+            self.lines.append("    cmp rax, 0")
             self.lines.append("    jge %s" % done_label)
             self.lines.append("    neg eax")
             self.lines.append("%s:" % done_label)
@@ -646,14 +820,14 @@ class AssemblyGenerator:
             self.lines.append("    cdqe")
             self.lines.append("    mov QWORD PTR %s, rax" % self.temp_mem(slot))
             self.emit_expression(node.children[1])
-            self.lines.append("    mov r10d, eax")
-            self.lines.append("    mov eax, DWORD PTR %s" % self.temp_mem(slot))
+            self.lines.append("    mov r10, rax")
+            self.lines.append("    mov rax, QWORD PTR %s" % self.temp_mem(slot))
             self.release_temp()
-            self.lines.append("    cmp eax, r10d")
+            self.lines.append("    cmp rax, r10")
             if name == "min":
-                self.lines.append("    cmovg eax, r10d")
+                self.lines.append("    cmovg rax, r10")
             else:
-                self.lines.append("    cmovl eax, r10d")
+                self.lines.append("    cmovl rax, r10")
             return
 
         raise CodegenError("unsupported builtin '%s'" % name, node.line)
@@ -674,12 +848,14 @@ class AssemblyGenerator:
         else:
             raise CodegenError("unsupported postfix operator '%s'" % node.value, node.line)
         self.store_eax(variable)
-        self.lines.append("    mov eax, DWORD PTR %s" % self.temp_mem(slot))
+        self.lines.append("    mov rax, QWORD PTR %s" % self.temp_mem(slot))
         self.release_temp()
 
     def load_variable(self, variable: VariableInfo) -> None:
         if variable.type_name == "char":
             self.lines.append("    movsx eax, %s" % self.byte_mem(variable))
+        elif self.is_i64_type(variable.type_name):
+            self.lines.append("    mov rax, %s" % self.qword_mem(variable))
         else:
             self.lines.append("    mov eax, %s" % self.dword_mem(variable))
 
@@ -688,8 +864,15 @@ class AssemblyGenerator:
             raise CodegenError("cannot assign to const variable '%s'" % variable.name, variable.line)
         if variable.type_name == "char":
             self.lines.append("    mov %s, al" % self.byte_mem(variable))
+        elif self.is_i64_type(variable.type_name):
+            self.lines.append("    mov %s, rax" % self.qword_mem(variable))
         else:
             self.lines.append("    mov %s, eax" % self.dword_mem(variable))
+
+    def store_xmm0(self, variable: VariableInfo) -> None:
+        if variable.is_const:
+            raise CodegenError("cannot assign to const variable '%s'" % variable.name, variable.line)
+        self.lines.append("    movsd %s, xmm0" % self.qword_mem(variable))
 
     def load_address(self, register: str, variable: VariableInfo) -> None:
         if variable.is_global:
@@ -702,6 +885,9 @@ class AssemblyGenerator:
 
     def dword_mem(self, variable: VariableInfo) -> str:
         return "DWORD PTR %s" % self.variable_address(variable)
+
+    def qword_mem(self, variable: VariableInfo) -> str:
+        return "QWORD PTR %s" % self.variable_address(variable)
 
     def variable_address(self, variable: VariableInfo) -> str:
         if variable.is_global:
@@ -741,8 +927,10 @@ class AssemblyGenerator:
                 return "string"
             if self.is_char_literal(text):
                 return "char"
+            if self.is_float_literal(text):
+                return "double"
             if self.is_int_literal(text):
-                return "int"
+                return "long long" if any(ch in text.lower() for ch in "lu") else "int"
             return self.lookup_variable(text, node.line).type_name
         if node.kind == "Call":
             if node.name in BUILTIN_FUNCTIONS:
@@ -758,7 +946,25 @@ class AssemblyGenerator:
                 return "int"
             if len(node.children) == 1:
                 return self.expression_type(node.children[0])
+            if self.is_real_type(self.expression_type(node.children[0])) or self.is_real_type(
+                self.expression_type(node.children[1])
+            ):
+                return "double"
+            if self.is_i64_type(self.expression_type(node.children[0])) or self.is_i64_type(
+                self.expression_type(node.children[1])
+            ):
+                return "long long"
             return "int"
+        if node.kind == "Cast":
+            return node.type_name
+        if node.kind == "Conditional" and len(node.children) == 3:
+            left = self.expression_type(node.children[1])
+            right = self.expression_type(node.children[2])
+            if self.is_real_type(left) or self.is_real_type(right):
+                return "double"
+            if self.is_i64_type(left) or self.is_i64_type(right):
+                return "long long"
+            return left or right
         return None
 
     def for_parts(self, node):
@@ -802,6 +1008,9 @@ class AssemblyGenerator:
             return len(node.children) + (max(nested) if nested else 0)
         if node.kind == "Postfix":
             return 1
+        if node.kind in {"Cast", "Conditional"}:
+            child_needs = [self.needed_temp_slots(child) for child in node.children]
+            return max(child_needs) if child_needs else 0
         if node.kind == "Operator":
             if len(node.children) == 1:
                 return self.needed_temp_slots(node.children[0])
@@ -821,7 +1030,7 @@ class AssemblyGenerator:
         text = node.value or ""
         if type_name == "char" and self.is_char_literal(text):
             return self.char_value(text)
-        if type_name == "int" and self.is_int_literal(text):
+        if type_name in {"int", "long long", "unsigned long long", "bool"} and self.is_int_literal(text):
             return self.int_value(text)
         raise CodegenError("global initializer type does not match declaration", node.line)
 
@@ -871,11 +1080,46 @@ class AssemblyGenerator:
 
     @staticmethod
     def int_value(text: str) -> int:
+        text = re.sub(r"(?:[uU]?[lL]{1,2}|[lL]{1,2}[uU]?)$", "", text or "")
         if re.fullmatch(r"[+-]?0[0-7]+", text or ""):
             sign = -1 if text.startswith("-") else 1
             digits = text[1:] if text[0] in "+-" else text
             return sign * int(digits, 8)
         return int(text, 0)
+
+    @staticmethod
+    def is_i64_type(type_name: Optional[str]) -> bool:
+        return type_name in {"long long", "unsigned long long"}
+
+    def input_format(self, type_name: str) -> str:
+        if type_name == "char":
+            return ".Lfmt_read_char"
+        if self.is_real_type(type_name):
+            return ".Lfmt_read_double"
+        if self.is_i64_type(type_name):
+            return ".Lfmt_read_i64"
+        return ".Lfmt_read_int"
+
+    def output_format(self, type_name: str) -> str:
+        if type_name == "char":
+            return ".Lfmt_write_char"
+        if self.is_real_type(type_name):
+            return ".Lfmt_write_double"
+        if self.is_i64_type(type_name):
+            return ".Lfmt_write_i64"
+        return ".Lfmt_write_int"
+
+    @staticmethod
+    def is_real_type(type_name: Optional[str]) -> bool:
+        return type_name in REAL_TYPES
+
+    @staticmethod
+    def is_float_literal(text: str) -> bool:
+        return FLOAT_LITERAL_RE.fullmatch(text or "") is not None
+
+    @staticmethod
+    def double_bits(text: str) -> int:
+        return struct.unpack("<Q", struct.pack("<d", float(text)))[0]
 
     @staticmethod
     def char_value(text: str) -> int:

@@ -6,7 +6,7 @@ from typing import List, Optional, Sequence, Union
 IDENTIFIER_CODE = 700
 CONSTANT_CODES = {400, 500, 600, 800}
 EOF_CODE = 0
-TYPE_KEYWORDS = {"int", "float", "char", "void"}
+TYPE_KEYWORDS = {"int", "float", "double", "char", "void", "bool", "long", "short", "signed", "unsigned"}
 RELATIONAL_OPERATORS = {"<", ">", "<=", ">=", "==", "!="}
 COMPOUND_ASSIGNMENTS = {"+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%"}
 UNSUPPORTED_CPP_KEYWORDS = {
@@ -68,6 +68,8 @@ class Lexer:
         ")": 202,
         "[": 203,
         "]": 204,
+        "?": 220,
+        ":": 231,
         "!": 205,
         "*": 206,
         "/": 207,
@@ -214,6 +216,9 @@ class Lexer:
             self.advance()
             while not self.at_end() and self.current().isdigit():
                 self.advance()
+
+        while not self.at_end() and (self.current().isalpha() or self.current() == "_"):
+            self.advance()
 
         return Token(self.source[start:self.pos], token_code, line)
 
@@ -570,7 +575,7 @@ class Parser:
         return self.parse_assignment()
 
     def parse_assignment(self) -> ASTNode:
-        left = self.parse_logical_or()
+        left = self.parse_conditional()
         if self.current().lexeme == "=" or self.current().lexeme in COMPOUND_ASSIGNMENTS:
             op = self.advance()
             right = self.parse_assignment()
@@ -586,6 +591,20 @@ class Parser:
                 return ASTNode("Operator", value="=", line=op.line, children=[left, right])
             return ASTNode("Operator", value=op.lexeme, line=op.line, children=[left, right])
         return left
+
+    def parse_conditional(self) -> ASTNode:
+        condition = self.parse_logical_or()
+        if not self.match("?"):
+            return condition
+        token = self.tokens[self.pos - 1]
+        then_expr = self.parse_expression()
+        self.expect(":")
+        else_expr = self.parse_conditional()
+        return ASTNode(
+            "Conditional",
+            line=token.line,
+            children=[condition, then_expr, else_expr],
+        )
 
     def parse_logical_or(self) -> ASTNode:
         node = self.parse_logical_and()
@@ -637,6 +656,17 @@ class Parser:
 
     def parse_unary(self) -> ASTNode:
         token = self.current()
+        if token.lexeme == "(" and self.looks_like_cast():
+            line = token.line
+            self.expect("(")
+            type_token = self.expect_type()
+            self.expect(")")
+            return ASTNode(
+                "Cast",
+                line=line,
+                type_name=type_token.lexeme,
+                children=[self.parse_unary()],
+            )
         if token.lexeme in {"++", "--"}:
             op = self.advance()
             target = self.parse_unary()
@@ -728,12 +758,36 @@ class Parser:
 
     def expect_type(self) -> Token:
         token = self.current()
+        if token.lexeme == "unsigned" and self.peek(1).lexeme == "long" and self.peek(2).lexeme == "long":
+            line = token.line
+            self.advance()
+            self.advance()
+            self.advance()
+            return Token("unsigned long long", IDENTIFIER_CODE, line)
+        if token.lexeme == "long" and self.peek(1).lexeme == "long":
+            line = token.line
+            self.advance()
+            self.advance()
+            return Token("long long", IDENTIFIER_CODE, line)
         if self.is_type_token(token):
             return self.advance()
         self.error("expected type")
 
     def is_type_token(self, token: Token) -> bool:
         return token.lexeme in TYPE_KEYWORDS
+
+    def looks_like_cast(self) -> bool:
+        if self.peek(1).lexeme == "unsigned":
+            return self.peek(2).lexeme == "long" and self.peek(3).lexeme == "long" and self.peek(4).lexeme == ")"
+        if self.peek(1).lexeme == "long":
+            return self.peek(2).lexeme == "long" and self.peek(3).lexeme == ")"
+        return self.peek(1).lexeme in TYPE_KEYWORDS and self.peek(2).lexeme == ")"
+
+    def peek(self, distance: int) -> Token:
+        index = self.pos + distance
+        if index >= len(self.tokens):
+            return self.tokens[-1]
+        return self.tokens[index]
 
     def is_eof(self) -> bool:
         return self.current().token_code == EOF_CODE
