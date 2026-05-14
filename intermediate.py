@@ -289,6 +289,8 @@ class Parser:
                 children.extend(self.parse_const_decl())
             elif self.is_type_token(self.current()):
                 children.extend(self.parse_toplevel_type_stmt())
+            elif self.current().lexeme == "main":
+                children.extend(self.parse_implicit_int_main())
             elif self.current().lexeme == "std":
                 self.error("std:: prefixes are not supported; use 'using namespace std;'")
             elif self.current().lexeme in UNSUPPORTED_CPP_KEYWORDS:
@@ -323,6 +325,7 @@ class Parser:
                         children=params,
                     )
                 ]
+            self.require_parameter_names(params)
             body = self.parse_compound()
             return [
                 ASTNode(
@@ -335,25 +338,61 @@ class Parser:
             ]
         return self.parse_var_decl_rest(type_name, name_token)
 
+    def parse_implicit_int_main(self) -> List[ASTNode]:
+        name_token = self.expect_identifier()
+        if name_token.lexeme != "main":
+            self.error("only main may omit an int return type")
+        self.expect("(")
+        params = self.parse_parameter_list_opt()
+        self.expect(")")
+        if self.match(";"):
+            return [
+                ASTNode(
+                    "FunctionDecl",
+                    line=name_token.line,
+                    type_name="int",
+                    name=name_token.lexeme,
+                    children=params,
+                )
+            ]
+        self.require_parameter_names(params)
+        body = self.parse_compound()
+        return [
+            ASTNode(
+                "FunctionDef",
+                line=name_token.line,
+                type_name="int",
+                name=name_token.lexeme,
+                children=params + [body],
+            )
+        ]
+
     def parse_parameter_list_opt(self) -> List[ASTNode]:
         params: List[ASTNode] = []
         if self.current().lexeme == ")":
             return params
         while True:
             type_token = self.expect_type()
-            name_token = self.expect_identifier()
+            name_token: Optional[Token] = None
+            if self.current().token_code == IDENTIFIER_CODE:
+                name_token = self.advance()
             is_array = self.parse_array_suffix()
             params.append(
                 ASTNode(
                     "Param",
-                    line=name_token.line,
+                    line=name_token.line if name_token is not None else type_token.line,
                     type_name=self.array_type(type_token.lexeme, is_array),
-                    name=name_token.lexeme,
+                    name=name_token.lexeme if name_token is not None else "",
                 )
             )
             if not self.match(","):
                 break
         return params
+
+    def require_parameter_names(self, params: Sequence[ASTNode]) -> None:
+        for param in params:
+            if not param.name:
+                self.error("expected parameter name in function definition")
 
     def parse_const_decl(self) -> List[ASTNode]:
         self.expect("const")

@@ -76,11 +76,7 @@ docs/_build/
 target/
 
 .qoder/
-test/__pycache__/
-test/tmp_semantic/
-test/input.txt
-test/output.txt
-test2/
+test/
 
 
 # Jupyter Notebook

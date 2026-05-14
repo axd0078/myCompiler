@@ -24,6 +24,13 @@ def default_output_path(source_path: Path) -> Path:
     return source_path.with_suffix(".s")
 
 
+def read_source_text(source_path: Path) -> str:
+    try:
+        return source_path.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        return source_path.read_text(encoding="gbk")
+
+
 def compile_source(source_text: str) -> str:
     lexer = Lexer(source_text)
     tokens = lexer.tokenize()
@@ -63,9 +70,12 @@ def main(argv: list[str] | None = None) -> int:
     output_path = Path(args.output) if args.output else default_output_path(source_path)
 
     try:
-        source_text = source_path.read_text(encoding="utf-8-sig")
+        source_text = read_source_text(source_path)
     except OSError as exc:
         print("error: cannot read %s: %s" % (source_path, exc), file=sys.stderr)
+        return 1
+    except UnicodeDecodeError as exc:
+        print("error: cannot decode %s: %s" % (source_path, exc), file=sys.stderr)
         return 1
 
     try:

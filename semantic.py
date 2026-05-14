@@ -16,6 +16,7 @@ ERROR_ASSIGN_TO_CONST = 309
 ERROR_OPERAND_TYPE = 310
 
 FUNCTION_KINDS = {"FunctionDecl", "FunctionDef"}
+BUILTIN_FUNCTIONS = {"read", "write"}
 BLOCK_KINDS = {"Compound"}
 STATEMENT_KINDS = {
     "Compound",
@@ -261,6 +262,10 @@ class SemanticAnalyzer:
         return_type = node.type_name or ""
         param_types = [param.type_name or "" for param in params]
 
+        if name in BUILTIN_FUNCTIONS:
+            self.record_error(node.line, ERROR_FUNCTION_REDEFINED)
+            return
+
         existing = self.functions.get(name)
         if existing is None:
             self.functions[name] = FunctionSymbol(
@@ -303,7 +308,7 @@ class SemanticAnalyzer:
         context = FunctionContext(return_type=node.type_name or "void", end_line=end_line)
         self.analyze_compound(body, function_scope, context, loop_depth=0, create_scope=False)
 
-        if context.return_type != "void" and not context.valid_return:
+        if context.return_type != "void" and not context.valid_return and name != "main":
             context.invalid_return = True
         if context.invalid_return:
             self.record_error(context.end_line, ERROR_RETURN_MISMATCH)
@@ -528,6 +533,17 @@ class SemanticAnalyzer:
 
         if node.kind == "Call":
             args = [self.analyze_expression(child, scope) for child in node.children]
+            if node.name == "read":
+                if args:
+                    self.record_error(node.line, ERROR_ARGUMENT_COUNT)
+                return ExprResult(type_name="int")
+            if node.name == "write":
+                if len(args) != 1:
+                    self.record_error(node.line, ERROR_ARGUMENT_COUNT)
+                elif args[0].type_name is not None and args[0].type_name != "int":
+                    self.record_error(node.line, ERROR_ARGUMENT_TYPE)
+                return ExprResult(type_name="void")
+
             function = self.functions.get(node.name or "")
             if function is None:
                 self.record_error(node.line, ERROR_FUNCTION_UNDECLARED)

@@ -202,6 +202,8 @@ class AssemblyGenerator:
             frame.scopes[-1][param.name] = param
         self.emit_param_stores(frame)
         self.emit_compound(self.function_body(node), create_scope=False)
+        if frame.name == "main" and frame.return_type == "int":
+            self.lines.append("    xor eax, eax")
         self.lines.append("%s:" % frame.return_label)
         self.lines.extend(
             [
@@ -560,6 +562,13 @@ class AssemblyGenerator:
 
     def emit_call(self, node) -> None:
         name = node.name or ""
+        if name == "read":
+            self.emit_builtin_read(node)
+            return
+        if name == "write":
+            self.emit_builtin_write(node)
+            return
+
         info = self.functions.get(name)
         if info is None:
             raise CodegenError("function '%s' is not declared" % name, node.line)
@@ -588,6 +597,29 @@ class AssemblyGenerator:
 
         frame.temp_depth = base_depth
         self.lines.append("    call %s" % name)
+
+    def emit_builtin_read(self, node) -> None:
+        if node.children:
+            raise CodegenError("read expects no arguments", node.line)
+        slot = self.reserve_temp()
+        self.lines.append("    lea rdx, %s" % self.temp_mem(slot))
+        self.lines.append("    lea rcx, .Lfmt_read_int[rip]")
+        self.lines.append("    xor eax, eax")
+        self.lines.append("    call scanf")
+        self.lines.append("    mov eax, DWORD PTR %s" % self.temp_mem(slot))
+        self.release_temp()
+
+    def emit_builtin_write(self, node) -> None:
+        if len(node.children) != 1:
+            raise CodegenError("write expects one argument", node.line)
+        type_name = self.expression_type(node.children[0])
+        if type_name != "int":
+            raise CodegenError("write supports only int expressions", node.children[0].line or node.line)
+        self.emit_expression(node.children[0])
+        self.lines.append("    mov edx, eax")
+        self.lines.append("    lea rcx, .Lfmt_write_int[rip]")
+        self.lines.append("    xor eax, eax")
+        self.lines.append("    call printf")
 
     def load_variable(self, variable: VariableInfo) -> None:
         if variable.type_name == "char":
@@ -657,6 +689,10 @@ class AssemblyGenerator:
                 return "int"
             return self.lookup_variable(text, node.line).type_name
         if node.kind == "Call":
+            if node.name == "read":
+                return "int"
+            if node.name == "write":
+                return "void"
             info = self.functions.get(node.name or "")
             return info.return_type if info is not None else None
         if node.kind == "Operator":
@@ -695,7 +731,7 @@ class AssemblyGenerator:
             return 0
         own = 0
         if node.kind == "Call":
-            own = len(node.children)
+            own = 2 if node.name in {"read", "write"} else len(node.children)
         elif node.kind in {"InputStmt", "OutputStmt"}:
             own = 2
         return max([own] + [self.max_call_args(child) for child in node.children])
@@ -706,6 +742,8 @@ class AssemblyGenerator:
         if node.kind in {"Leaf", "Empty"}:
             return 0
         if node.kind == "Call":
+            if node.name == "read":
+                return 1
             nested = [self.needed_temp_slots(child) for child in node.children]
             return len(node.children) + (max(nested) if nested else 0)
         if node.kind == "Operator":
