@@ -1,3 +1,11 @@
+"""命令行编译入口。
+
+这个文件只负责把完整编译流水线串起来：
+源码文件 -> 词法分析 -> 语法分析 -> 语义分析 -> 汇编生成 -> 写出 .s 文件。
+
+真正的词法/语法逻辑在 intermediate.py，语义检查在 semantic.py，汇编生成在 codegen.py。
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -10,21 +18,30 @@ from semantic import SemanticAnalyzer
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
+    """解析命令行参数。
+
+    当前版本只支持 `-S`，即“生成汇编文件”。链接成 exe 的步骤交给 GCC/MinGW。
+    """
     parser = argparse.ArgumentParser(
         prog="mycompiler.py",
-        description="Compile a small C++ subset source file to Windows x86-64 assembly.",
+        description="Compile a small C subset source file to Windows x86-64 assembly.",
     )
-    parser.add_argument("source", help="source .cpp file")
+    parser.add_argument("source", help="source .c/.txt file")
     parser.add_argument("-S", action="store_true", help="emit assembly")
     parser.add_argument("-o", dest="output", help="output assembly path")
     return parser.parse_args(argv)
 
 
 def default_output_path(source_path: Path) -> Path:
+    """没有显式 `-o` 时，把输入文件后缀替换为 `.s`。"""
     return source_path.with_suffix(".s")
 
 
 def read_source_text(source_path: Path) -> str:
+    """读取源码文本。
+
+    测试文件可能含中文注释且编码不统一，所以先尝试 UTF-8 BOM，再退回 GBK。
+    """
     try:
         return source_path.read_text(encoding="utf-8-sig")
     except UnicodeDecodeError:
@@ -32,6 +49,14 @@ def read_source_text(source_path: Path) -> str:
 
 
 def compile_source(source_text: str) -> str:
+    """把源码字符串编译成汇编字符串。
+
+    这个函数是最核心的编译流水线。每一步都只在上一阶段成功后继续：
+    1. Lexer 产生 token；
+    2. Parser 产生 AST；
+    3. SemanticAnalyzer 做语义检查；
+    4. generate_assembly 生成最终汇编。
+    """
     lexer = Lexer(source_text)
     tokens = lexer.tokenize()
     if lexer.errors:
@@ -57,10 +82,12 @@ def compile_source(source_text: str) -> str:
 
 
 class CompileFailure(Exception):
+    """统一包装编译阶段错误，方便命令行入口打印。"""
     pass
 
 
 def main(argv: list[str] | None = None) -> int:
+    """命令行入口，负责文件 I/O 和错误码。"""
     args = parse_args(sys.argv[1:] if argv is None else argv)
     if not args.S:
         print("error: only -S assembly output is supported in v1", file=sys.stderr)

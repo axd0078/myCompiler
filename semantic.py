@@ -1,6 +1,11 @@
+"""语义分析阶段。
+
+语义分析接收 Parser 生成的 AST，负责检查“语法正确但语义不合理”的问题：
+重定义、未声明、函数签名不匹配、返回值错误、break 使用位置、内建 read/write 规则等。
+"""
+
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 
@@ -28,8 +33,6 @@ STATEMENT_KINDS = {
     "ReturnStmt",
     "ContinueStmt",
     "BreakStmt",
-    "InputStmt",
-    "OutputStmt",
     "Empty",
 }
 DECL_KINDS = {"ConstDecl", "VarDecl"}
@@ -66,14 +69,15 @@ ARITHMETIC_NODE_NAMES = {
 IDENTIFIER_RE = re.compile(r"[A-Za-z_]\w*")
 INT_LITERAL_RE = re.compile(r"[+-]?(?:0|[1-9]\d*|0[xX][0-9A-Fa-f]+|0[0-7]+)")
 FLOAT_LITERAL_RE = re.compile(r"[+-]?(?:(?:\d+\.\d*|\d*\.\d+)(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)")
-NODE_WITH_LINE_RE = re.compile(r"^(ReturnStmt|ContinueStmt|BreakStmt|InputStmt|OutputStmt)\[(\d+)\]$")
-DECL_RE = re.compile(r"^(FunctionDecl|FunctionDef|VarDecl|ConstDecl|Param)\(([^()\s]+)\s+([^)]+)\)\[(\d+)\]$")
-CALL_RE = re.compile(r"^Call\((.+)\)\[(\d+)\]$")
-VALUE_RE = re.compile(r"^(.*?)\s*\[(\d+)\]$")
 
 
 @dataclass
 class ASTNode:
+    """语义模块使用的 AST 节点结构。
+
+    这个结构与 intermediate.py 的 ASTNode 字段保持一致。
+    """
+
     kind: str
     line: Optional[int] = None
     type_name: Optional[str] = None
@@ -84,6 +88,8 @@ class ASTNode:
 
 @dataclass
 class Scope:
+    """作用域节点，保存当前作用域直接声明的名字。"""
+
     id: int
     parent: Optional["Scope"]
     names: Dict[str, "Symbol"] = field(default_factory=dict)
@@ -97,6 +103,8 @@ class Scope:
 
 @dataclass
 class Symbol:
+    """变量或常量符号。"""
+
     name: str
     type_name: str
     line: int
@@ -107,6 +115,8 @@ class Symbol:
 
 @dataclass
 class FunctionSymbol:
+    """函数声明/定义的签名记录。"""
+
     name: str
     return_type: str
     line: int
@@ -116,6 +126,11 @@ class FunctionSymbol:
 
 @dataclass
 class ExprResult:
+    """表达式分析结果。
+
+    type_name 用于类型检查；symbol/is_lvalue 用于赋值左值和常量赋值检查。
+    """
+
     type_name: Optional[str] = None
     symbol: Optional[Symbol] = None
     is_lvalue: bool = False
@@ -123,6 +138,8 @@ class ExprResult:
 
 @dataclass
 class FunctionContext:
+    """分析函数体时保存的返回值上下文。"""
+
     return_type: str
     end_line: int
     any_return: bool = False
@@ -132,86 +149,21 @@ class FunctionContext:
 
 @dataclass
 class AnalysisResult:
+    """语义分析输出。"""
+
     errors: List[Tuple[int, int]]
     const_table: str
     var_table: str
     function_table: str
 
 
-def parse_ast_text(input_text: str) -> ASTNode:
-    root: Optional[ASTNode] = None
-    stack: List[Tuple[int, ASTNode]] = []
-
-    for raw_line in input_text.splitlines():
-        if not raw_line.strip():
-            continue
-        expanded = raw_line.expandtabs(2)
-        indent = len(expanded) - len(expanded.lstrip(" "))
-        node = parse_ast_line(expanded.strip())
-
-        while stack and stack[-1][0] >= indent:
-            stack.pop()
-
-        if stack:
-            stack[-1][1].children.append(node)
-        else:
-            root = node
-
-        stack.append((indent, node))
-
-    if root is None:
-        raise ValueError("AST input is empty")
-    return root
 
 
-def parse_ast_line(text: str) -> ASTNode:
-    text = text.lstrip("\ufeff")
-
-    if text in {
-        "Program",
-        "Compound",
-        "IfStmt",
-        "WhileStmt",
-        "ForStmt",
-        "DoWhileStmt",
-        "ExprStmt",
-        "InputStmt",
-        "OutputStmt",
-        "Empty",
-    }:
-        return ASTNode(kind=text)
-
-    match = NODE_WITH_LINE_RE.match(text)
-    if match:
-        return ASTNode(kind=match.group(1), line=int(match.group(2)))
-
-    match = DECL_RE.match(text)
-    if match:
-        return ASTNode(
-            kind=match.group(1),
-            type_name=match.group(2),
-            name=match.group(3),
-            line=int(match.group(4)),
-        )
-
-    match = CALL_RE.match(text)
-    if match:
-        return ASTNode(kind="Call", name=match.group(1), line=int(match.group(2)))
-
-    match = VALUE_RE.match(text)
-    if match:
-        value = match.group(1).strip()
-        line = int(match.group(2))
-        kind = "Operator" if value in OPERATOR_SET else "Leaf"
-        return ASTNode(kind=kind, value=value, line=line)
-
-    if IDENTIFIER_RE.fullmatch(text):
-        return ASTNode(kind="Leaf", value=text)
-
-    raise ValueError(f"Unsupported AST node: {text}")
 
 
 class SemanticAnalyzer:
+    """AST 语义检查器。"""
+
     def __init__(self, root: ASTNode):
         self.root = root
         self.errors: List[Tuple[int, int]] = []
@@ -223,6 +175,7 @@ class SemanticAnalyzer:
         self.const_names = set()
 
     def analyze(self) -> AnalysisResult:
+        """执行完整语义分析并返回错误和符号表文本。"""
         global_scope = self.new_scope(None)
         if self.root.kind != "Program":
             raise ValueError("AST root must be Program")
@@ -238,11 +191,13 @@ class SemanticAnalyzer:
         )
 
     def new_scope(self, parent: Optional[Scope]) -> Scope:
+        """创建一个新作用域。"""
         scope = Scope(id=self.scope_counter, parent=parent)
         self.scope_counter += 1
         return scope
 
     def analyze_toplevel(self, node: ASTNode, scope: Scope) -> None:
+        """分析顶层节点：全局声明或函数。"""
         if node.kind == "ConstDecl":
             self.handle_const_decl(node, scope)
             return
@@ -255,6 +210,7 @@ class SemanticAnalyzer:
         self.analyze_statement(node, scope, None, loop_depth=0)
 
     def handle_function(self, node: ASTNode, global_scope: Scope) -> None:
+        """检查函数声明/定义，并在函数体内建立参数作用域。"""
         params = [child for child in node.children if child.kind == "Param"]
         body = node.children[-1] if node.children and node.children[-1].kind == "Compound" else None
         status = "def" if body is not None else "decl"
@@ -321,6 +277,7 @@ class SemanticAnalyzer:
         loop_depth: int,
         create_scope: bool = True,
     ) -> bool:
+        """分析复合语句块，必要时创建块级作用域。"""
         current_scope = self.new_scope(scope) if create_scope else scope
         found_break = False
 
@@ -342,20 +299,13 @@ class SemanticAnalyzer:
         context: Optional[FunctionContext],
         loop_depth: int,
     ) -> bool:
+        """分析语句节点，返回该语句中是否出现 break。"""
         if node.kind == "Compound":
             return self.analyze_compound(node, scope, context, loop_depth, create_scope=True)
 
         if node.kind == "ExprStmt":
             if node.children:
                 self.analyze_expression(node.children[0], scope)
-            return False
-
-        if node.kind == "InputStmt":
-            self.handle_input(node, scope)
-            return False
-
-        if node.kind == "OutputStmt":
-            self.handle_output(node, scope)
             return False
 
         if node.kind == "Empty":
@@ -409,25 +359,7 @@ class SemanticAnalyzer:
 
         return False
 
-    def handle_input(self, node: ASTNode, scope: Scope) -> None:
-        for child in node.children:
-            result = self.analyze_expression(child, scope)
-            if result.symbol is None:
-                continue
-            if not result.is_lvalue or result.symbol.kind == "const":
-                self.record_error(child.line or node.line, ERROR_ASSIGN_TO_CONST)
-                continue
-            if result.type_name not in {"int", "char"}:
-                self.record_error(child.line or node.line, ERROR_OPERAND_TYPE)
-
-    def handle_output(self, node: ASTNode, scope: Scope) -> None:
-        for child in node.children:
-            result = self.analyze_expression(child, scope)
-            if result.type_name is None:
-                continue
-            if result.type_name not in {"int", "char"}:
-                self.record_error(child.line or node.line, ERROR_OPERAND_TYPE)
-
+    """遇到循环语句 加上一层循环"""
     def handle_loop_body(
         self,
         body: Optional[ASTNode],
@@ -442,12 +374,14 @@ class SemanticAnalyzer:
         return False
 
     def handle_return(self, node: ASTNode, scope: Scope, context: Optional[FunctionContext]) -> None:
+        """检查 return 是否符合当前函数返回类型。"""
         if context is None:
             return
 
         context.any_return = True
         expr = node.children[0] if node.children else None
 
+        """void 后面不能跟东西"""
         if context.return_type == "void":
             if expr is None:
                 context.valid_return = True
@@ -456,16 +390,19 @@ class SemanticAnalyzer:
             context.invalid_return = True
             return
 
+        """非void函数后面写了 return;"""
         if expr is None:
             context.invalid_return = True
             return
 
+        """非void函数写了return expr; 判断返回类型对不对"""
         result = self.analyze_expression(expr, scope)
         if result.type_name is None or result.type_name == context.return_type:
             context.valid_return = True
         else:
             context.invalid_return = True
 
+    """添加常量到变量表"""
     def handle_const_decl(self, node: ASTNode, scope: Scope) -> None:
         initializer = self.expr_to_text(node.children[0]) if node.children else "-"
         self.const_names.add(node.name or "")
@@ -484,6 +421,7 @@ class SemanticAnalyzer:
         if node.children:
             self.analyze_expression(node.children[0], scope)
 
+    """添加变量到变量表"""
     def handle_var_decl(self, node: ASTNode, scope: Scope) -> None:
         initializer = self.expr_to_text(node.children[0]) if node.children else "-"
         symbol = self.declare_symbol(
@@ -510,6 +448,7 @@ class SemanticAnalyzer:
         kind: str,
         role: str,
     ) -> Optional[Symbol]:
+        """在当前作用域声明变量/常量/参数，并检查同作用域重定义。"""
         if name in scope.names:
             self.record_error(line, ERROR_NAME_REDEFINED)
             return None
@@ -525,7 +464,9 @@ class SemanticAnalyzer:
         scope.names[name] = symbol
         return symbol
 
+    """分析表达式类型、函数调用、赋值合法性和内建函数规则。"""
     def analyze_expression(self, node: ASTNode, scope: Scope) -> ExprResult:
+        """叶子节点查作用域或识别字面量类型"""
         if node.kind == "Leaf":
             if node.children:
                 return self.analyze_unknown_expression_node(node, scope)
@@ -545,6 +486,7 @@ class SemanticAnalyzer:
                 return ExprResult(type_name="void")
 
             function = self.functions.get(node.name or "")
+            """函数未声明"""
             if function is None:
                 self.record_error(node.line, ERROR_FUNCTION_UNDECLARED)
                 return ExprResult()
@@ -561,9 +503,6 @@ class SemanticAnalyzer:
         if node.kind != "Operator":
             return ExprResult()
 
-        if not node.children:
-            return ExprResult()
-
         if len(node.children) == 1:
             child = self.analyze_expression(node.children[0], scope)
             if node.value == "!":
@@ -571,17 +510,22 @@ class SemanticAnalyzer:
             return ExprResult(type_name=child.type_name)
 
         if node.value == "=":
+            """检查等号左边是不是常量"""
             if self.assignment_target_is_const_like(node.children[0], scope):
                 self.record_error(node.line, ERROR_ASSIGN_TO_CONST)
+            """再检查等号左右"""
             left = self.analyze_expression(node.children[0], scope)
             right = self.analyze_expression(node.children[1], scope)
+            """最终算完再检查 防御性编程"""
             if node.line not in self.error_lines and not left.is_lvalue:
                 self.record_error(node.line, ERROR_ASSIGN_TO_CONST)
             return ExprResult(type_name=left.type_name or right.type_name)
 
+        """二元运算符"""
         left = self.analyze_expression(node.children[0], scope)
         right = self.analyze_expression(node.children[1], scope)
 
+        """左右类型需要一致"""
         if self.is_arithmetic_operator_value(node.value):
             if self.types_mismatch(left.type_name, right.type_name):
                 self.record_error(node.line, ERROR_OPERAND_TYPE)
@@ -597,6 +541,7 @@ class SemanticAnalyzer:
             self.record_error(self.expression_error_line(node), ERROR_OPERAND_TYPE)
         return ExprResult(type_name=child_results[0].type_name if child_results else None)
 
+    """一组表达式的操作数类型是否匹配"""
     def expression_types_mismatch(self, results: Sequence[ExprResult]) -> bool:
         categories = {
             self.type_category(result.type_name)
@@ -605,6 +550,7 @@ class SemanticAnalyzer:
         }
         return len(categories) > 1
 
+    """检查表达式左右两边的类型是否冲突"""
     def types_mismatch(self, left_type: Optional[str], right_type: Optional[str]) -> bool:
         left_category = self.type_category(left_type)
         right_category = self.type_category(right_type)
@@ -617,6 +563,7 @@ class SemanticAnalyzer:
             return "real"
         return type_name
 
+    """叶子节点带了子节点  防御性代码 配合470行"""
     def analyze_unknown_expression_node(self, node: ASTNode, scope: Scope) -> ExprResult:
         child_results = [self.analyze_expression(child, scope) for child in node.children]
         if self.contains_arithmetic_operator(node) and self.expression_types_mismatch(child_results):
@@ -626,6 +573,7 @@ class SemanticAnalyzer:
                 return ExprResult(type_name=result.type_name)
         return ExprResult()
 
+    """判断字符串值是否代表算术运算符"""
     def is_arithmetic_operator_value(self, value: Optional[str]) -> bool:
         if value is None:
             return False
@@ -634,11 +582,13 @@ class SemanticAnalyzer:
             return True
         return any(marker in value for marker in ARITHMETIC_OPERATORS)
 
+    """判断AST子树是否涉及算术运算"""
     def contains_arithmetic_operator(self, node: ASTNode) -> bool:
         if self.is_arithmetic_operator_value(node.value):
             return True
         return any(self.contains_arithmetic_operator(child) for child in node.children)
 
+    """定位具体报错行数"""
     def expression_error_line(self, node: ASTNode) -> Optional[int]:
         if node.line is not None:
             return node.line
@@ -648,6 +598,7 @@ class SemanticAnalyzer:
                 return line
         return None
 
+    """判断左侧是不是常量"""
     def assignment_target_is_const_like(self, node: ASTNode, scope: Scope) -> bool:
         if self.assignment_target_contains_const(node, scope):
             return True
@@ -655,6 +606,7 @@ class SemanticAnalyzer:
             return True
         return self.detect_literal_type(node.value or "") is not None
 
+    """判断有没有对常量复制"""
     def assignment_target_contains_const(self, node: ASTNode, scope: Scope) -> bool:
         if node.kind == "Leaf":
             symbol = self.lookup_symbol(scope, node.value or "")
@@ -667,7 +619,9 @@ class SemanticAnalyzer:
                 return True
         return False
 
+    """到达叶子节点 这个叶子是什么"""
     def analyze_leaf(self, node: ASTNode, scope: Scope) -> ExprResult:
+        """分析变量引用或字面量。"""
         text = node.value or ""
         symbol = self.lookup_symbol(scope, text)
         if symbol is not None:
@@ -681,11 +635,13 @@ class SemanticAnalyzer:
         if literal_type is not None:
             return ExprResult(type_name=literal_type)
 
+        """未声明的标识符"""
         if IDENTIFIER_RE.fullmatch(text):
             self.record_error(node.line, ERROR_NAME_UNDECLARED)
         return ExprResult()
 
     def lookup_symbol(self, scope: Scope, name: str) -> Optional[Symbol]:
+        """从当前作用域向父作用域查找符号。"""
         current: Optional[Scope] = scope
         while current is not None:
             if name in current.names:
@@ -694,6 +650,7 @@ class SemanticAnalyzer:
         return None
 
     def detect_literal_type(self, text: str) -> Optional[str]:
+        """判断字面量类型"""
         if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
             return "string"
         if len(text) >= 3 and text[0] == "'" and text[-1] == "'":
@@ -708,6 +665,7 @@ class SemanticAnalyzer:
             return "char"
         return None
 
+    """找最大行号"""
     def max_line(self, node: Optional[ASTNode]) -> Optional[int]:
         if node is None:
             return None
@@ -719,6 +677,7 @@ class SemanticAnalyzer:
                 candidate = child_line if candidate is None else max(candidate, child_line)
         return candidate
 
+    """发现函数返回值问题时 报错应该在函数体最后一行"""
     def estimate_block_end_line(self, node: Optional[ASTNode], fallback: int) -> int:
         if node is None:
             return fallback
@@ -728,11 +687,13 @@ class SemanticAnalyzer:
         return max_line
 
     def record_error(self, line: Optional[int], code: int) -> None:
+        """记录语义错误；同一行只保留一个错误，减少级联报错。"""
         if line is None or line in self.error_lines:
             return
         self.error_lines.add(line)
         self.errors.append((line, code))
 
+    """AST树转源代码文本"""
     def expr_to_text(self, node: ASTNode) -> str:
         if node.kind == "Leaf":
             return node.value or ""
@@ -766,46 +727,10 @@ class SemanticAnalyzer:
             for symbol in self.functions.values()
         )
 
+    """格式化输出"""
     @staticmethod
     def format_rows(rows: Iterable[str]) -> str:
         materialized = list(rows)
         if not materialized:
             return ""
         return "\n".join(materialized) + "\n"
-
-
-def analyze_text(input_text: str) -> AnalysisResult:
-    root = parse_ast_text(input_text)
-    analyzer = SemanticAnalyzer(root)
-    return analyzer.analyze()
-
-
-def generate_output(input_text: str) -> str:
-    result = analyze_text(input_text)
-    if not result.errors:
-        return ""
-    return "\n".join(f"{line} {code}" for line, code in result.errors) + "\n"
-
-
-def write_result_files(result: AnalysisResult, base_dir: Path) -> None:
-    output_text = ""
-    if result.errors:
-        output_text = "\n".join(f"{line} {code}" for line, code in result.errors) + "\n"
-
-    (base_dir / "output.txt").write_text(output_text, encoding="utf-8")
-    (base_dir / "const.txt").write_text(result.const_table, encoding="utf-8")
-    (base_dir / "var.txt").write_text(result.var_table, encoding="utf-8")
-    (base_dir / "function.txt").write_text(result.function_table, encoding="utf-8")
-
-
-def main() -> int:
-    base_dir = Path.cwd()
-    input_path = base_dir / "input.txt"
-    input_text = input_path.read_text(encoding="utf-8-sig")
-    result = analyze_text(input_text)
-    write_result_files(result, base_dir)
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

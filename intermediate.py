@@ -1,3 +1,10 @@
+"""词法分析、语法分析、AST 和教学用四元式生成。
+
+当前主编译流程会使用本文件中的 `Lexer` 和 `Parser`：
+源码文本先被 `Lexer` 拆成 token，再由 `Parser` 生成 AST。
+最终汇编生成并不依赖四元式，而是由 codegen.py 直接遍历 AST 完成。
+"""
+
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Sequence, Union
@@ -25,6 +32,11 @@ UNSUPPORTED_CPP_KEYWORDS = {
 
 
 class Token:
+    """词法单元。
+
+    lexeme 是源码中的原始文本，token_code 是项目使用的类别编号，line 用于报错定位。
+    """
+
     def __init__(self, lexeme: str, token_code: int, line: int):
         self.lexeme = lexeme
         self.token_code = int(token_code)
@@ -37,6 +49,15 @@ class ParserError(Exception):
 
 @dataclass
 class ASTNode:
+    """语法树节点。
+
+    同一个节点结构承载声明、语句、表达式等多种语法元素：
+    - kind 表示节点类型，例如 FunctionDef、VarDecl、Operator；
+    - name 常用于函数/变量/参数名；
+    - value 常用于字面量或运算符；
+    - children 保存子树。
+    """
+
     kind: str
     line: Optional[int] = None
     value: Optional[str] = None
@@ -46,6 +67,12 @@ class ASTNode:
 
 
 class Lexer:
+    """手写词法分析器。
+
+    通过 `pos` 在源码字符串中线性前进，按当前字符分派到标识符、数字、字符、
+    字符串和运算符等读取函数。
+    """
+
     KEYWORDS = {
         "char": 101,
         "int": 102,
@@ -101,6 +128,10 @@ class Lexer:
         self.errors: List[str] = []
 
     def tokenize(self) -> List[Token]:
+        """扫描完整源码并返回 token 列表。
+
+        词法错误不会立即抛异常，而是记录到 `self.errors`，由调用方决定是否停止编译。
+        """
         tokens: List[Token] = []
         while not self.at_end():
             self.skip_whitespace_and_comments()
@@ -149,6 +180,10 @@ class Lexer:
         return ch
 
     def skip_whitespace_and_comments(self) -> None:
+        """跳过空白、注释和预处理器行。
+
+        当前项目没有实现真正的预处理器；以 `#` 开头的行会被整体跳过。
+        """
         while not self.at_end():
             if self.current() in " \t\r\n":
                 self.advance()
@@ -177,6 +212,7 @@ class Lexer:
             break
 
     def read_identifier(self) -> Token:
+        """读取关键字或普通标识符。"""
         start = self.pos
         line = self.line
         while not self.at_end() and (self.current().isalnum() or self.current() == "_"):
@@ -185,6 +221,10 @@ class Lexer:
         return Token(lexeme, self.KEYWORDS.get(lexeme, IDENTIFIER_CODE), line)
 
     def read_number(self) -> Token:
+        """读取整数或浮点形式 token。
+
+        词法层能识别浮点 token，但当前汇编后端只支持 int/char 的可运行代码。
+        """
         start = self.pos
         line = self.line
 
@@ -258,6 +298,7 @@ class Lexer:
         return Token('"' + "".join(chars) + '"', 600, line)
 
     def read_operator(self) -> Optional[Token]:
+        """读取单字符或双字符运算符/分隔符。"""
         line = self.line
         two = self.current() + self.peek()
         if two in self.DOUBLE_TOKENS:
@@ -274,6 +315,12 @@ class Lexer:
 
 
 class Parser:
+    """递归下降语法分析器。
+
+    Parser 按语法结构拆分为多个 `parse_xxx` 函数，最终返回 Program AST。
+    表达式部分按优先级从低到高分层解析。
+    """
+
     def __init__(self, tokens: Sequence[Token]):
         self.tokens = list(tokens)
         eof_line = self.tokens[-1].line if self.tokens else 1
@@ -281,6 +328,7 @@ class Parser:
         self.pos = 0
 
     def parse(self) -> ASTNode:
+        """解析整个 token 流，返回 Program 根节点。"""
         children: List[ASTNode] = []
         while not self.is_eof():
             if self.current().lexeme == "using":
@@ -308,6 +356,11 @@ class Parser:
         self.expect(";")
 
     def parse_toplevel_type_stmt(self) -> List[ASTNode]:
+        """解析以类型开头的顶层声明。
+
+        `int a;` 会走变量声明路径；`int f(...)` 会根据后续是 `;` 还是 `{`
+        区分函数声明和函数定义。
+        """
         type_token = self.expect_type()
         name_token = self.expect_identifier()
         is_array = self.parse_array_suffix()
@@ -339,6 +392,7 @@ class Parser:
         return self.parse_var_decl_rest(type_name, name_token)
 
     def parse_implicit_int_main(self) -> List[ASTNode]:
+        """兼容旧测试中的 `main()` 写法，并按 `int main()` 处理。"""
         name_token = self.expect_identifier()
         if name_token.lexeme != "main":
             self.error("only main may omit an int return type")
@@ -368,6 +422,11 @@ class Parser:
         ]
 
     def parse_parameter_list_opt(self) -> List[ASTNode]:
+        """解析可选参数列表。
+
+        函数声明允许 `int f(int,int);` 这种无参数名写法；函数定义会在后续
+        `require_parameter_names()` 中强制要求参数名。
+        """
         params: List[ASTNode] = []
         if self.current().lexeme == ")":
             return params
@@ -473,13 +532,10 @@ class Parser:
         return self.parse_var_decl_rest(type_token.lexeme, name_token)
 
     def parse_statement(self) -> ASTNode:
+        """根据当前 token 选择具体语句解析函数。"""
         lexeme = self.current().lexeme
         if lexeme == "{":
             return self.parse_compound()
-        if lexeme == "cin":
-            return self.parse_input_stmt()
-        if lexeme == "cout":
-            return self.parse_output_stmt()
         if lexeme == "std":
             self.error("std:: prefixes are not supported; use 'using namespace std;'")
         if lexeme == "if":
@@ -503,31 +559,6 @@ class Parser:
         if lexeme in UNSUPPORTED_CPP_KEYWORDS:
             self.error("unsupported C++ feature '%s'" % lexeme)
         return self.parse_expr_stmt()
-
-    def parse_input_stmt(self) -> ASTNode:
-        token = self.expect("cin")
-        children: List[ASTNode] = []
-        if not self.match(">>"):
-            self.error("expected '>>' after cin")
-        while True:
-            target = self.expect_identifier()
-            children.append(ASTNode("Leaf", value=target.lexeme, line=target.line))
-            if not self.match(">>"):
-                break
-        self.expect(";")
-        return ASTNode("InputStmt", line=token.line, children=children)
-
-    def parse_output_stmt(self) -> ASTNode:
-        token = self.expect("cout")
-        children: List[ASTNode] = []
-        if not self.match("<<"):
-            self.error("expected '<<' after cout")
-        while True:
-            children.append(self.parse_expression())
-            if not self.match("<<"):
-                break
-        self.expect(";")
-        return ASTNode("OutputStmt", line=token.line, children=children)
 
     def parse_if_stmt(self) -> ASTNode:
         self.expect("if")
@@ -594,9 +625,11 @@ class Parser:
         return self.parse_expression()
 
     def parse_expression(self) -> ASTNode:
+        """表达式入口，当前最低优先级是赋值。"""
         return self.parse_assignment()
 
     def parse_assignment(self) -> ASTNode:
+        """解析右结合赋值表达式。"""
         left = self.parse_logical_or()
         if self.match("="):
             op = self.tokens[self.pos - 1]
@@ -660,6 +693,8 @@ class Parser:
         return self.parse_postfix()
 
     def parse_postfix(self) -> ASTNode:
+        """解析后缀表达式，目前主要是函数调用。"""
+        """它先解析出一个基础表达式，例如 sum，如果后面遇到 (，就把它变成 Call 节点。"""
         node = self.parse_primary()
         while self.match("("):
             args = self.parse_argument_list_opt()
@@ -731,6 +766,7 @@ class Parser:
         return self.current().token_code == EOF_CODE
 
     def error(self, message: str) -> None:
+        """抛出带行号和当前 token 的语法错误。"""
         token = self.current()
         got = token.lexeme or "EOF"
         raise ParserError("Line %s: %s, got '%s'" % (token.line, message, got))
@@ -761,12 +797,15 @@ class LoopContext:
 
 
 class IntermediateCodeGenerator:
+    """生成四元式中间表示"""
+
     def __init__(self) -> None:
         self.quads: List[Quad] = []
         self.temp_counter = 0
         self.loop_stack: List[LoopContext] = []
 
     def generate(self, root: ASTNode) -> str:
+        """从 Program AST 生成四元式文本。"""
         if root.kind != "Program":
             raise ValueError("AST root must be Program")
 
@@ -775,6 +814,7 @@ class IntermediateCodeGenerator:
 
         return self.format_quads()
 
+    """先做全局变量和函数"""
     def generate_toplevel(self, node: ASTNode) -> None:
         if node.kind in {"FunctionDef", "FunctionDecl"}:
             self.generate_function(node)
@@ -787,14 +827,17 @@ class IntermediateCodeGenerator:
             return
 
         self.emit(node.name or "_")
+        """函数体"""
         self.generate_compound(body)
 
         if node.type_name == "void" and not self.ends_with_ret():
             self.emit("ret", "_", "_", "_")
 
+        """补充exit(0)"""
         if node.name == "main" and not self.ends_with_sys():
             self.emit("sys")
 
+    """提取函数体"""
     def function_body(self, node: ASTNode) -> Optional[ASTNode]:
         if node.children and node.children[-1].kind == "Compound":
             return node.children[-1]
@@ -802,6 +845,7 @@ class IntermediateCodeGenerator:
 
     def generate_compound(self, node: ASTNode) -> None:
         for child in node.children:
+            """声明节点"""
             if child.kind in {"VarDecl", "ConstDecl"}:
                 self.generate_declaration(child)
             else:
@@ -812,15 +856,10 @@ class IntermediateCodeGenerator:
             value = self.generate_expression(node.children[0])
             self.emit("=", value, "_", node.name or "_")
 
+    "表达式"
     def generate_statement(self, node: ASTNode) -> None:
         if node.kind == "Compound":
             self.generate_compound(node)
-        elif node.kind == "InputStmt":
-            for target in node.children:
-                self.emit("in", "_", "_", self.expression_place(target))
-        elif node.kind == "OutputStmt":
-            for child in node.children:
-                self.emit("out", self.generate_expression(child), "_", "_")
         elif node.kind == "ExprStmt":
             if node.children:
                 self.generate_expression(node.children[0])
@@ -848,7 +887,9 @@ class IntermediateCodeGenerator:
         else_branch = node.children[2] if len(node.children) > 2 else None
 
         jumps = self.generate_bool(condition)
+        """回填真出口"""
         self.backpatch(jumps.true_list, self.next_quad())
+        """生成then"""
         self.generate_statement(then_branch)
 
         if else_branch is None:
@@ -856,9 +897,11 @@ class IntermediateCodeGenerator:
             self.backpatch(jumps.false_list, end_target)
             return
 
+        """有else then后面补一条无条件跳转 跳过else"""
         after_then = self.emit("J", "_", "_", 0)
 
         false_target = self.next_quad()
+        """回填假出口"""
         self.backpatch(jumps.false_list, false_target)
         self.generate_statement(else_branch)
 
@@ -866,17 +909,21 @@ class IntermediateCodeGenerator:
         self.backpatch([after_then], end_target)
 
     def generate_while(self, node: ASTNode) -> None:
+        """记住条件位置"""
         condition_start = self.next_quad()
         jumps = self.generate_bool(node.children[0])
         self.backpatch(jumps.true_list, self.next_quad())
 
+        """continue直接跳转到条件判断位置"""
         context = LoopContext(break_list=[], continue_list=[], continue_target=condition_start)
         self.loop_stack.append(context)
         if len(node.children) > 1:
             self.generate_statement(node.children[1])
         self.loop_stack.pop()
 
+        """循环结束跳回条件呢"""
         self.emit("J", "_", "_", condition_start)
+        """填三个出口 条件判断为假 break语句跳转哪里 continue语句跳转哪里"""
         end_target = self.next_quad()
         self.backpatch(jumps.false_list, end_target)
         self.backpatch(context.break_list, end_target)
@@ -885,6 +932,7 @@ class IntermediateCodeGenerator:
     def generate_for(self, node: ASTNode) -> None:
         body = node.children[-1] if node.children else None
         expressions = node.children[:-1]
+        """初始化 条件判断 步进"""
         init = expressions[0] if len(expressions) >= 1 and expressions[0].kind != "Empty" else None
         condition = expressions[1] if len(expressions) >= 2 and expressions[1].kind != "Empty" else None
         step = expressions[2] if len(expressions) >= 3 and expressions[2].kind != "Empty" else None
@@ -901,6 +949,7 @@ class IntermediateCodeGenerator:
         if step is not None:
             self.generate_expression(step)
 
+        """步进之后立刻跳转条件判断"""
         self.emit("J", "_", "_", condition_start)
         body_start = self.next_quad()
         if jumps is not None:
@@ -912,15 +961,18 @@ class IntermediateCodeGenerator:
             self.generate_statement(body)
         self.loop_stack.pop()
 
+        """循环体末尾直接到步进"""
         if body is not None and not self.ends_with_control_jump(body):
             self.emit("J", "_", "_", step_start)
 
+        """填假出口和break"""
         end_target = self.next_quad()
         if jumps is not None:
             self.backpatch(jumps.false_list, end_target)
         self.backpatch(context.break_list, end_target)
 
     def generate_do_while(self, node: ASTNode) -> None:
+        """跟while的区别是先做了一次循环 再去判断"""
         body_start = self.next_quad()
         body = node.children[0] if node.children else None
         condition = node.children[1] if len(node.children) > 1 else None
@@ -943,6 +995,7 @@ class IntermediateCodeGenerator:
 
         self.backpatch(context.break_list, end_target)
 
+    """break 和 continue 都把回填的交给外层循环 continue需要判断while for 跳转到位置不一样"""
     def generate_break(self) -> None:
         target = self.emit("J", "_", "_", 0)
         if self.loop_stack:
@@ -958,6 +1011,7 @@ class IntermediateCodeGenerator:
                 self.backpatch([target], context.continue_target)
 
     def generate_expression(self, node: ASTNode) -> str:
+        """for(;;)"""
         if node.kind == "Empty":
             return "_"
 
@@ -977,6 +1031,7 @@ class IntermediateCodeGenerator:
                 return self.generate_expression(node.children[0])
             return "_"
 
+        """处理+/-/!"""
         if len(node.children) == 1:
             value = self.generate_expression(node.children[0])
             if node.value == "+":
@@ -994,6 +1049,7 @@ class IntermediateCodeGenerator:
             self.emit("=", right, "_", left)
             return left
 
+        """二元运算符"""
         left = self.generate_expression(node.children[0])
         right = self.generate_expression(node.children[1])
         result = self.new_temp()
@@ -1006,6 +1062,7 @@ class IntermediateCodeGenerator:
         return self.generate_expression(node)
 
     def generate_bool(self, node: ASTNode) -> BoolJumps:
+        """生成布尔表达式跳转，并返回需要回填的真假出口。"""
         if node.kind == "Operator" and node.value == "&&" and len(node.children) >= 2:
             left = self.generate_bool(node.children[0])
             self.backpatch(left.true_list, self.next_quad())
@@ -1052,6 +1109,7 @@ class IntermediateCodeGenerator:
         return len(self.quads) - 1
 
     def backpatch(self, targets: Sequence[int], value: int) -> None:
+        """把尚未确定目标的跳转指令回填到指定四元式下标。"""
         for target in targets:
             self.quads[target].result = value
 
@@ -1093,6 +1151,7 @@ class IntermediateCodeGenerator:
 
 
 def generate_output(source_text: str, check_semantic: bool = False) -> str:
+    """旧版命令行兼容入口：源码 -> 四元式文本。"""
     del check_semantic
     lexer = Lexer(source_text)
     tokens = lexer.tokenize()

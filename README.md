@@ -1,15 +1,14 @@
 # myCompiler
 
-一个用 Python 编写的小型 C++ 子集编译器。当前实现面向教学和本地算法题程序，输入源码，完成词法分析、语法分析、语义检查，最终输出 Windows x86-64 汇编。
+一个用 Python 编写的最小 C 子集编译器。当前实现面向教学和算法题式的小程序，输入类 C 源码，输出 Windows x86-64 汇编。
 
-当前版本的目标不是覆盖完整 C++，而是稳定支持这一类程序：
+当前目标不是覆盖完整 C 语言，而是把一条清晰、可读、可验证的编译链路跑通：
 
-- 单文件
-- 无头文件或只写 `using namespace std;`
-- `main()` / `int main()`
-- 整数和字符运算
-- `cin` / `cout`
-- 或内建 `read()` / `write()`
+```text
+source text -> token stream -> AST -> semantic checks -> x86-64 assembly
+```
+
+如果你想看更细的实现拆解，可以继续读 [docs/compile-to-assembly.md](docs/compile-to-assembly.md)。README 先给出项目能力和核心算法。
 
 ## 当前能力
 
@@ -17,262 +16,164 @@
 
 - `main()` 和 `int main()`
 - `int` / `char` / `void`
-- 局部变量和全局变量
-- `const` 常量
-- 函数声明和函数定义
-- 函数声明允许省略参数名，例如 `int sum(int, int);`
-- 函数定义要求参数有名字
-- 普通函数调用、嵌套调用、递归
+- 全局变量、局部变量、`const`
+- 函数声明、函数定义、递归调用
 - `if` / `else`
-- `while`
-- `for`
-- `do while`
-- `break` / `continue`
-- `return`
-- 一元运算：`+`、`-`、`!`
-- 二元运算：`+`、`-`、`*`、`/`、`%`
-- 比较运算：`<`、`<=`、`>`、`>=`、`==`、`!=`
-- 逻辑运算：`&&`、`||`
-- `cin >> a >> b`
-- `cout << expr << expr2`
-- 内建 `read()`
-- 内建 `write(expr)`
+- `while` / `for` / `do while`
+- `break` / `continue` / `return`
+- 整数与字符常量
+- 表达式：`+`、`-`、`*`、`/`、`%`
+- 比较与逻辑：`<`、`<=`、`>`、`>=`、`==`、`!=`、`&&`、`||`、`!`
+- 内建输入 `read()`
+- 内建输出 `write(expr)`
 
-## 输入输出模型
+当前不支持：
 
-当前版本支持两套输入输出接口。
+- `#include`、宏展开、预处理器
+- 指针、结构体、数组代码生成
+- `float` / `double` 代码生成
+- 源码级 `scanf` / `printf`
+- `cin` / `cout`
+- 完整标准库
 
-### 1. C++ 风格 `cin` / `cout`
+## 算法实现
 
-```cpp
-using namespace std;
+编译入口在 `mycompiler.py`。主流程是：
 
-main() {
-    int a, b;
-    cin >> a >> b;
-    cout << a + b;
-    return 0;
-}
-```
+1. `Lexer.tokenize()` 把源码字符流切成 token。
+2. `Parser.parse()` 用递归下降把 token 流整理成 AST。
+3. `SemanticAnalyzer.analyze()` 做作用域、符号表和语义约束检查。
+4. `generate_assembly()` 直接基于 AST 生成 Windows x86-64 汇编。
 
-约束：
+### 1. 词法分析
 
-- 只支持 `using namespace std;`
-- 不支持 `std::cin` / `std::cout`
-- `cin` 目前只支持把值读入变量
-- `cout` 目前只支持输出 `int` / `char` 表达式
+词法分析器在 `intermediate.py` 的 `Lexer` 中，采用单指针线性扫描：
 
-### 2. 内建 `read()` / `write()`
+- 从左到右读取源码字符。
+- 跳过空白符、单行注释、多行注释，以及 `#` 开头的整行。
+- 遇到字母或下划线时读取标识符，再查关键字表决定是关键字还是普通名字。
+- 遇到数字时读取整数字面量。
+- 遇到 `'` 或 `"` 时分别读取字符常量和字符串常量。
+- 遇到运算符时优先匹配双字符运算符，再回退到单字符运算符。
 
-```cpp
-main() {
-    int a;
-    a = read();
-    write(a + 100);
-    return 0;
-}
-```
+这个阶段的关键点不是“把字符拆开”，而是尽早完成最便宜的分类工作。后续语法分析不再关心原始字符，只处理已经分类好的 token。
 
-语义规则：
+### 2. 语法分析
 
-- `read()` 不接收参数，返回 `int`
-- `write(expr)` 只接收一个 `int`
-- `write` 不自动输出空格或换行
-- `read` 和 `write` 是内建函数，用户代码不能重新声明或定义
+语法分析器也在 `intermediate.py`，核心方法是手写递归下降。
 
-后端实现上，`cin` / `cout` 和 `read` / `write` 最终都会映射到 `scanf` / `printf` 调用。
+主要策略：
 
-## 不支持的内容
+- 顶层先区分“声明”和“定义”。
+- 表达式按优先级分层解析：赋值、逻辑或、逻辑与、相等、关系、加减、乘除模、一元、后缀。
+- 每个语法结构都直接生成 AST 节点，而不是先构造临时文本表示。
 
-当前仍然不支持：
+这种写法的优点是可控。我们可以明确决定每一层优先级如何结合，也能在出错时把报错位置压到当前 token 附近。
 
-- `#include` 和预处理器展开
-- 头文件依赖解析
-- `std::` 前缀调用
-- 类、模板、异常、`new` / `delete`
-- 指针
-- 数组代码生成
-- 结构体
-- `float` / `double` 后端代码生成
-- 字符串表达式代码生成
-- 多参数 `write`
-- 完整 C / C++ 标准库
+### 3. 语义分析
+
+语义分析在 `semantic.py`，输入是 AST，输出是错误列表和几张符号表文本。
+
+核心算法是“作用域栈 + 符号登记 + AST 递归检查”：
+
+- 进入函数或复合语句块时创建新作用域。
+- 声明变量、常量、参数时登记到当前作用域。
+- 查找名字时从当前作用域逐层向父作用域回溯。
+- 分析表达式时同步推导类型，检查赋值、运算、函数调用是否合法。
+
+当前重点检查：
+
+- 名字重定义
+- 标识符未声明
+- 函数声明/定义不一致
+- 函数参数个数或类型不匹配
+- `const` 被赋值
+- `break` / `continue` 是否出现在循环中
+- `return` 是否匹配函数返回类型
+- `read()` / `write(expr)` 是否满足内建函数约束
+
+### 4. 代码生成
+
+汇编生成在 `codegen.py`，当前后端不经过独立 IR，而是直接遍历 AST 输出汇编。
+
+主要做法：
+
+- 预扫描顶层 AST，收集函数签名和全局变量。
+- 为每个函数建立栈帧，给参数、局部变量、临时槽分配偏移。
+- 表达式求值统一把结果放进寄存器，再按节点类型继续组合。
+- 控制流通过自动生成标签实现，例如 `if`、循环、`break`、`continue`。
+- 函数调用遵循 Windows x64 调用约定。
+- `read()` / `write()` 最终映射到 `scanf("%d", ...)` 和 `printf("%d", ...)`。
+
+这个后端的核心取舍是“先保证结构正确，再考虑优化”。所以当前更强调可读性和可验证性，而不是指令级优化。
 
 ## 项目结构
 
 ```text
 myCompiler/
-├── mycompiler.py      # 命令行入口，串联前端、语义分析和汇编生成
-├── intermediate.py    # 词法分析、递归下降语法分析、AST 和四元式生成
-├── semantic.py        # 语义分析、作用域和符号表
-├── codegen.py         # Windows x86-64 汇编生成
-├── scanner.py         # 早期词法分析实验文件
-├── parser.py          # 早期语法分析实验文件
+├── mycompiler.py                 # 命令行入口，串联完整编译流程
+├── intermediate.py               # 词法分析、递归下降语法分析、AST、辅助 IR
+├── semantic.py                   # 语义分析与符号表检查
+├── codegen.py                    # Windows x86-64 汇编生成
+├── visualizer_tk.py              # Tkinter 可视化界面
+├── docs/
+│   └── compile-to-assembly.md    # 更详细的算法实现说明
 ├── .gitignore
 └── README.md
 ```
 
-当前完整编译流程以 `mycompiler.py` 为入口。`scanner.py` 和 `parser.py` 仍保留为早期实验代码，不参与主流程。
+说明：
 
-## 编译流程
-
-主流程在 `mycompiler.py` 中：
-
-1. `Lexer` 把源码切成 token
-2. `Parser` 把 token 解析成 AST
-3. `SemanticAnalyzer` 做语义检查
-4. `generate_assembly()` 把 AST 转成 Windows x86-64 汇编
-
-如果任一阶段报错，编译会直接失败，并把错误打印到标准错误输出。
-
-## 词法与语法实现
-
-`intermediate.py` 同时包含前端核心逻辑：
-
-- `Lexer`：手写扫描器，支持关键字、标识符、整数字面量、字符/字符串字面量、注释和双字符运算符
-- `Parser`：手写递归下降分析器
-- `ASTNode`：统一语法树节点结构
-- `IntermediateCodeGenerator`：把 AST 转成四元式
-
-语法分析里的几个关键设计：
-
-- 顶层 `type identifier` 前缀通过向后看 `(` / `{` / 其他符号区分“函数”和“变量声明”
-- 表达式按优先级拆成多层递归函数：赋值、逻辑或、逻辑与、相等、关系、加减、乘除模、一元、后缀
-- `cin` / `cout` 被单独解析为 `InputStmt` / `OutputStmt`
-- `using namespace std;` 被显式识别，其余 `std::` 形式直接拒绝
-
-`intermediate.py` 也保留了四元式生成能力，但主编译入口当前直接走 AST 到汇编的路径。
-
-## 语义分析实现
-
-`semantic.py` 以 AST 为输入，做三类核心工作：
-
-### 1. 作用域和符号表
-
-- 全局作用域
-- 函数作用域
-- 复合语句块作用域
-- 普通变量、常量、函数分别建表
-
-### 2. 语义检查
-
-当前实现会检查：
-
-- 标识符重定义
-- 标识符未声明
-- 函数重定义
-- 函数未声明
-- 函数参数个数不匹配
-- 函数参数类型不匹配
-- 返回值类型不匹配
-- `break` 是否在循环中
-- 常量赋值
-- 算术操作数类型不匹配
-- `cin` 输入目标是否合法
-- `cout` 输出类型是否合法
-
-### 3. 内建函数规则
-
-`read` / `write` 在语义阶段按内建函数处理：
-
-- `read()` 必须零参数，返回 `int`
-- `write(expr)` 必须单参数，参数类型必须为 `int`
-
-## 汇编后端实现
-
-`codegen.py` 负责把 AST 生成为 Windows x86-64 汇编。当前后端特点：
-
-- 输出 Intel 语法汇编
-- 调用约定按 Windows x64 寄存器传参规则处理
-- 支持全局变量和局部变量
-- 支持 `char` / `int`
-- 支持条件分支和循环标签生成
-- 支持函数调用、参数传递、返回值处理
-- `cin` / `cout` 和 `read` / `write` 最终映射到 `scanf` / `printf`
-
-后端限制也比较明确：
-
-- 数组语法可以被前端识别，但后端不生成数组访问代码
-- `float` / `double` 不生成代码
-- 字符串表达式不生成代码
+- `visualizer_tk.py` 是辅助学习工具，可以查看 token、AST、语义结果、四元式和最终汇编。
+- 本地 `test/` 目录不再作为仓库内容同步；可视化工具在没有 `test/` 时会回退到内置示例源码。
 
 ## 使用方法
 
-### 1. 生成汇编
+生成汇编：
 
 ```powershell
-python mycompiler.py -S input.cpp -o build\program.s
+python mycompiler.py -S example.c -o build\example.s
 ```
 
-如果不传 `-o`，默认输出到同名 `.s` 文件。
-
-### 2. 链接为可执行文件
+链接为可执行文件：
 
 ```powershell
-gcc build\program.s -o build\program.exe
+gcc build\example.s -o build\example.exe
 ```
 
-### 3. 运行
+示例源码：
 
-```powershell
-@('3','5') | .\build\program.exe
-```
-
-源码读取编码策略：
-
-- 优先按 `utf-8-sig` 读取
-- 失败后回退到 `gbk`
-
-## 示例
-
-### 1. `cin` / `cout`
-
-```cpp
-using namespace std;
-
-int sum(int a, int b) {
-    return a + b;
-}
-
-main() {
-    int x, y;
-    cin >> x >> y;
-    cout << sum(x, y);
-    return 0;
-}
-```
-
-### 2. `read` / `write`
-
-```cpp
-int sum(int, int);
-
-main() {
-    int a = read();
-    int b = read();
-    write(sum(a, b));
-    return 0;
-}
-
+```c
 int sum(int x, int y) {
     return x + y;
 }
+
+int main() {
+    int a = read();
+    int b = read();
+    write(sum(a, b));
+}
 ```
 
-## 当前限制
+如果源码包含中文注释，编译器会优先按 `utf-8-sig` 读取，失败后回退到 `gbk`。
 
-- 三地址码生成存在，但主流程没有把四元式作为后端输入
-- `test/` 目录当前按本地文件处理，不随仓库提交
-- 前端能识别的部分语法，后端不一定都能生成代码，尤其是数组和更复杂的类型
-- 目前只面向 Windows x86-64 汇编输出
-- 没有做优化阶段
+## 可视化工具
 
-## 后续方向
+运行：
 
-- 收紧“前端可接受但后端不支持”的语法范围，减少阶段间能力不一致
-- 把四元式真正接入后端，而不是只作为独立实验能力保留
-- 增加更稳定的本地测试入口
-- 继续扩展类型系统和代码生成能力
+```powershell
+python visualizer_tk.py
+```
+
+它会把源码分阶段展示为：
+
+- token 列表
+- AST
+- 语义分析结果
+- 辅助四元式
+- 最终 `.s` 汇编
+
+这个界面不参与正式编译，只用于观察每个阶段的中间结果。
 
 ## 许可证
 
